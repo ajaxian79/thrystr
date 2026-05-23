@@ -402,6 +402,40 @@ double data_spatial_period_nm(const AppState& state) {
     return data ? std::max(0.000001, data->data.spatial_period_nm) : 1.0;
 }
 
+std::size_t scalar_count(const AppState& state) {
+    return state.analysis ? state.analysis->scalars.size() : 0u;
+}
+
+std::size_t clamp_index(double value, std::size_t count) {
+    if (count == 0u) {
+        return 0u;
+    }
+    const double clamped = std::clamp(value, 0.0, static_cast<double>(count - 1u));
+    return static_cast<std::size_t>(std::llround(clamped));
+}
+
+void clamp_segment(AppState& state) {
+    const std::size_t count = scalar_count(state);
+    if (count == 0u) {
+        state.segment.selection_start = 0u;
+        state.segment.selection_end = 0u;
+        state.segment.active = false;
+        state.selection_drag_handle = 0;
+        return;
+    }
+    state.segment.selection_start =
+        std::min(state.segment.selection_start, count - 1u);
+    state.segment.selection_end =
+        std::min(state.segment.selection_end, count - 1u);
+}
+
+std::pair<std::size_t, std::size_t> normalized_selection(const AppState& state) {
+    return {
+        std::min(state.segment.selection_start, state.segment.selection_end),
+        std::max(state.segment.selection_start, state.segment.selection_end),
+    };
+}
+
 void sync_entity_name(AppState& state) {
     if (state.entity_name_id == state.selected_entity_id) {
         return;
@@ -476,6 +510,7 @@ void create_section(AppState& state) {
     state.segment.active = true;
     state.segment.selection_start = 0;
     state.segment.selection_end = state.analysis->scalars.size() - 1u;
+    state.selection_drag_handle = 0;
     state.status = "Created x-line section";
 }
 
@@ -1409,6 +1444,70 @@ void draw_entity_toolbox(AppState& state) {
         ImGui::PopID();
     }
 
+    Entity* data = data_entity(state);
+    if (data || state.analysis) {
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        skald::SectionHeader("Data");
+        if (state.analysis) {
+            const thrystr::Analysis& a = *state.analysis;
+            skald::KvRow("points", "%s", format_count(a.scalars.size()).c_str());
+            skald::KvRow("sample", "%s", format_bytes(a.window.length).c_str());
+        } else {
+            skald::KvRowStatus("source", "none", skald::BadgeTone::Muted);
+        }
+        if (data &&
+            value_bar_double("spatial period nm", &data->data.spatial_period_nm,
+                             0.01, "%.6f")) {
+            data->data.spatial_period_nm =
+                std::max(0.000001, data->data.spatial_period_nm);
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        skald::SectionHeader("X-Line Section");
+        if (state.analysis && !state.analysis->scalars.empty()) {
+            if (!state.segment.active) {
+                if (skald::AccentButton("Create Section", ImVec2(132.0f, 0.0f))) {
+                    create_section(state);
+                }
+            } else {
+                clamp_segment(state);
+                const double period = data_spatial_period_nm(state);
+                double start_index = static_cast<double>(state.segment.selection_start);
+                double end_index = static_cast<double>(state.segment.selection_end);
+                bool changed = false;
+                changed |= value_bar_double("start index", &start_index, 0.25, "%.0f");
+                changed |= value_bar_double("end index", &end_index, 0.25, "%.0f");
+                if (changed) {
+                    const std::size_t count = state.analysis->scalars.size();
+                    state.segment.selection_start = clamp_index(start_index, count);
+                    state.segment.selection_end = clamp_index(end_index, count);
+                    clamp_segment(state);
+                }
+                double start_nm =
+                    static_cast<double>(state.segment.selection_start) * period;
+                double end_nm =
+                    static_cast<double>(state.segment.selection_end) * period;
+                bool nm_changed = false;
+                nm_changed |= value_bar_double("start nm", &start_nm, period * 0.25, "%.3f");
+                nm_changed |= value_bar_double("end nm", &end_nm, period * 0.25, "%.3f");
+                if (nm_changed) {
+                    const std::size_t count = state.analysis->scalars.size();
+                    state.segment.selection_start = clamp_index(start_nm / period, count);
+                    state.segment.selection_end = clamp_index(end_nm / period, count);
+                    clamp_segment(state);
+                }
+                const auto [first, last] = normalized_selection(state);
+                skald::KvRow("span", "%.3f nm",
+                             static_cast<double>(last - first) * period);
+                if (skald::GhostButton("Select All", ImVec2(104.0f, 0.0f))) {
+                    create_section(state);
+                }
+            }
+        } else {
+            skald::KvRowStatus("section", "no data", skald::BadgeTone::Muted);
+        }
+    }
+
     if (!find_entity(state, state.selected_entity_id) && !state.entities.empty()) {
         select_entity(state, state.entities.front().id);
     }
@@ -1427,17 +1526,6 @@ void draw_entity_toolbox(AppState& state) {
     skald::PillToggle("Visible", &selected->visible);
 
     if (selected->type == EntityType::Data) {
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Data");
-        if (state.analysis) {
-            const thrystr::Analysis& a = *state.analysis;
-            skald::KvRow("points", "%s", format_count(a.scalars.size()).c_str());
-            skald::KvRow("sample", "%s", format_bytes(a.window.length).c_str());
-        } else {
-            skald::KvRowStatus("source", "none", skald::BadgeTone::Muted);
-        }
-        value_bar_double("spatial period nm", &selected->data.spatial_period_nm, 0.01, "%.6f");
-
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("Load Params");
         bool params_changed = false;
@@ -1532,6 +1620,7 @@ void draw_plot(AppState& state) {
     ImGui::BeginChild("##plot_scroll", ImVec2(0.0f, 0.0f), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
     ImGui::InvisibleButton("##plot_canvas", ImVec2(logical_width, plot_height));
+    const bool plot_hovered = ImGui::IsItemHovered();
 
     const ImVec2 item_min = ImGui::GetItemRectMin();
     const ImVec2 item_max = ImGui::GetItemRectMax();
@@ -1544,6 +1633,24 @@ void draw_plot(AppState& state) {
     const float plot_right = plot_left + static_cast<float>(count - 1) * x_step;
     const float plot_top = item_min.y + margin_top;
     const float plot_bottom = item_max.y - margin_bottom;
+    if (plot_hovered && ImGui::GetIO().MouseWheel != 0.0f) {
+        ImGuiIO& io = ImGui::GetIO();
+        const float factor = std::pow(1.12f, io.MouseWheel);
+        if (io.KeyCtrl || io.KeySuper) {
+            state.zoom_y = std::max(0.01f, state.zoom_y * factor);
+        } else {
+            const float old_step = x_step;
+            const float mouse_index = std::clamp(
+                (io.MousePos.x - plot_left) / old_step,
+                0.0f,
+                static_cast<float>(count - 1u));
+            state.zoom_x = std::max(0.01f, state.zoom_x * factor);
+            const float new_step =
+                std::max(0.05f, analysis.x_scale * std::max(0.01f, std::abs(state.zoom_x)));
+            const float mouse_local_x = io.MousePos.x - child_pos.x;
+            ImGui::SetScrollX(std::max(0.0f, mouse_index * new_step + margin_left - mouse_local_x));
+        }
+    }
     const float visible_left_local = ImGui::GetScrollX();
     const float visible_width = ImGui::GetWindowWidth();
     const float index_left = std::max(0.0f, (visible_left_local - margin_left) / x_step);
@@ -1595,10 +1702,8 @@ void draw_plot(AppState& state) {
     }
 
     if (state.segment.active) {
-        const std::size_t selection_first =
-            std::min(state.segment.selection_start, state.segment.selection_end);
-        const std::size_t selection_last =
-            std::max(state.segment.selection_start, state.segment.selection_end);
+        clamp_segment(state);
+        const auto [selection_first, selection_last] = normalized_selection(state);
         const float start_x = plot_left + static_cast<float>(selection_first) * x_step;
         const float end_x = plot_left + static_cast<float>(selection_last) * x_step;
         draw->AddRectFilled(ImVec2(start_x, plot_top), ImVec2(end_x, plot_bottom),
@@ -1607,36 +1712,50 @@ void draw_plot(AppState& state) {
                       IM_COL32(88, 170, 210, 210), 2.0f);
         draw->AddLine(ImVec2(end_x, plot_top), ImVec2(end_x, plot_bottom),
                       IM_COL32(88, 170, 210, 210), 2.0f);
+        draw->AddCircleFilled(ImVec2(start_x, plot_top + 8.0f), 4.0f,
+                              IM_COL32(88, 170, 210, 235));
+        draw->AddCircleFilled(ImVec2(end_x, plot_top + 8.0f), 4.0f,
+                              IM_COL32(88, 170, 210, 235));
+    }
 
-        const ImVec2 mouse = ImGui::GetIO().MousePos;
-        const bool hovered_canvas = ImGui::IsItemHovered();
-        const auto index_from_mouse = [&]() {
-            const double index = std::round((mouse.x - plot_left) / x_step);
-            return static_cast<std::size_t>(
-                std::clamp(index, 0.0, static_cast<double>(count - 1u)));
-        };
-        if (hovered_canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const auto index_from_mouse = [&]() {
+        const double index = std::round((mouse.x - plot_left) / x_step);
+        return static_cast<std::size_t>(
+            std::clamp(index, 0.0, static_cast<double>(count - 1u)));
+    };
+    if (plot_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const std::size_t index = index_from_mouse();
+        if (!state.segment.active) {
+            state.segment.active = true;
+            state.segment.selection_start = index;
+            state.segment.selection_end = index;
+            state.selection_drag_handle = 1;
+        } else {
+            const auto [selection_first, selection_last] = normalized_selection(state);
+            const float start_x = plot_left + static_cast<float>(selection_first) * x_step;
+            const float end_x = plot_left + static_cast<float>(selection_last) * x_step;
             const float start_distance = std::abs(mouse.x - start_x);
             const float end_distance = std::abs(mouse.x - end_x);
             state.selection_drag_handle = start_distance <= end_distance ? -1 : 1;
-            if (std::min(start_distance, end_distance) > 12.0f) {
-                const std::size_t index = index_from_mouse();
+            if (std::min(start_distance, end_distance) > 18.0f) {
                 state.segment.selection_start = index;
                 state.segment.selection_end = index;
                 state.selection_drag_handle = 1;
             }
         }
-        if (state.selection_drag_handle != 0) {
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                const std::size_t index = index_from_mouse();
-                if (state.selection_drag_handle < 0) {
-                    state.segment.selection_start = index;
-                } else {
-                    state.segment.selection_end = index;
-                }
+    }
+    if (state.selection_drag_handle != 0) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const std::size_t index = index_from_mouse();
+            if (state.selection_drag_handle < 0) {
+                state.segment.selection_start = index;
             } else {
-                state.selection_drag_handle = 0;
+                state.segment.selection_end = index;
             }
+            clamp_segment(state);
+        } else {
+            state.selection_drag_handle = 0;
         }
     }
 
