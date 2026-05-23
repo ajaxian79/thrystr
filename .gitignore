@@ -4,5 +4,6 @@ out/
 *.swp
 *.swo
 compile_commands.json
+imgui.ini
 .cache/
 .DS_Store

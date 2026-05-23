@@ -20,4 +20,10 @@ If `THRYSTR_SKALD_SOURCE_DIR` is omitted, CMake fetches Skald from GitHub.
 ./build/thrystr --file /path/to/binary
 ```
 
+For non-interactive rendering:
+
+```bash
+./build/thrystr --file /path/to/binary --screenshot out.png --frames 90
+```
+
 The app uses GLFW, OpenGL3, Dear ImGui, and the Skald theme/widget kit.
