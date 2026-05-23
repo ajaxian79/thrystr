@@ -89,9 +89,22 @@ void test_phase_fit_smoke() {
         scalars.push_back(static_cast<float>(std::sin(theta)));
     }
 
-    const thrystr::PhaseFit fit = thrystr::fit_wave_phase(scalars, false, 0.02, 180, 1024);
+    const thrystr::PhaseFit fit = thrystr::fit_wave_phase(
+        scalars, false, 1.0, 0.02, 180, 1024);
     assert(fit.hits >= 24);
     assert(fit.tested_points == scalars.size());
+}
+
+void test_phase_fit_respects_wave_scale() {
+    std::vector<float> scalars;
+    for (int i = 0; i < 64; ++i) {
+        const double theta = 4.0 * 3.14159265358979323846 * static_cast<double>(i) / 63.0;
+        scalars.push_back(static_cast<float>(std::sin(theta)));
+    }
+
+    const thrystr::PhaseFit fit = thrystr::fit_wave_phase(
+        scalars, false, 2.0, 0.02, 360, 1024);
+    assert(fit.hits >= 48);
 }
 
 void test_analyze_file_uses_mapper_stack() {
@@ -112,8 +125,8 @@ void test_analyze_file_uses_mapper_stack() {
         {thrystr::ValueMapperKind::Add, 10.0, true},
     };
     const thrystr::Analysis analysis = thrystr::analyze_file(
-        path, 4, thrystr::kDefaultMaxSlope, thrystr::kDefaultWaveTolerance,
-        90, 1024, mappers);
+        path, 4, thrystr::kDefaultMaxSlope, thrystr::kDefaultWaveScale,
+        thrystr::kDefaultWaveTolerance, 90, 1024, mappers);
 
     assert(analysis.bytes.size() == 4);
     assert(analysis.mapped_bytes.size() == 4);
@@ -135,6 +148,7 @@ int main() {
     test_highest_entropy_window();
     test_x_scale();
     test_phase_fit_smoke();
+    test_phase_fit_respects_wave_scale();
     test_analyze_file_uses_mapper_stack();
     return 0;
 }

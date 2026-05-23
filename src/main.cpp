@@ -12,10 +12,12 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -26,6 +28,16 @@ namespace {
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr float kInspectorWidth = 420.0f;
 constexpr const char* kOpenFileDialogId = "##open_file_dialog";
+constexpr const char* kWaveSettingsExtension = ".thryw";
+constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
+constexpr std::uint32_t kWaveSettingsVersion = 1;
+
+enum class DialogPurpose {
+    None,
+    OpenSource,
+    LoadWave,
+    SaveWave,
+};
 
 struct Args {
     std::string file;
@@ -44,6 +56,7 @@ struct FileBrowserEntry {
 
 struct AppState {
     char path[4096] = {};
+    char wave_path[4096] = {};
     std::optional<thrystr::Analysis> analysis;
     std::string status = "No file loaded";
     std::vector<thrystr::ValueMapper> mappers;
@@ -54,6 +67,7 @@ struct AppState {
     float zoom_x = 1.0f;
     float zoom_y = 1.0f;
     float max_slope = thrystr::kDefaultMaxSlope;
+    float wave_scale = static_cast<float>(thrystr::kDefaultWaveScale);
     float wave_tolerance = static_cast<float>(thrystr::kDefaultWaveTolerance);
     int phase_steps = 720;
     int phase_test_points = 65536;
@@ -61,6 +75,8 @@ struct AppState {
     std::vector<FileBrowserEntry> file_dialog_rows;
     std::vector<skald::FileDialogEntry> file_dialog_entries;
     int file_dialog_last_row = -1;
+    DialogPurpose pending_dialog = DialogPurpose::None;
+    DialogPurpose active_dialog = DialogPurpose::None;
     skald::Fonts fonts{};
 };
 
@@ -218,6 +234,31 @@ void refresh_file_dialog_entries(AppState& state) {
     }
 }
 
+template <typename T>
+void write_binary(std::ostream& output, const T& value) {
+    output.write(reinterpret_cast<const char*>(&value), sizeof(T));
+    if (!output) {
+        throw std::runtime_error("could not write wave settings");
+    }
+}
+
+template <typename T>
+T read_binary(std::istream& input) {
+    T value{};
+    input.read(reinterpret_cast<char*>(&value), sizeof(T));
+    if (!input) {
+        throw std::runtime_error("could not read wave settings");
+    }
+    return value;
+}
+
+std::filesystem::path with_wave_settings_extension(std::filesystem::path path) {
+    if (path.extension().empty()) {
+        path += kWaveSettingsExtension;
+    }
+    return path;
+}
+
 bool save_screenshot(const std::string& path, int width, int height) {
     std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
                                       static_cast<std::size_t>(height) * 4u);
@@ -251,6 +292,137 @@ std::size_t nice_tick(double raw) {
     return static_cast<std::size_t>(nice * exponent);
 }
 
+void load_path(AppState& state);
+
+void fit_wave_phases(AppState& state) {
+    if (!state.analysis) {
+        return;
+    }
+
+    try {
+        thrystr::Analysis& analysis = *state.analysis;
+        analysis.wave_scale = static_cast<double>(state.wave_scale);
+        analysis.sine = thrystr::fit_wave_phase(
+            analysis.scalars,
+            false,
+            analysis.wave_scale,
+            static_cast<double>(state.wave_tolerance),
+            state.phase_steps,
+            static_cast<std::size_t>(state.phase_test_points));
+        analysis.cosine = thrystr::fit_wave_phase(
+            analysis.scalars,
+            true,
+            analysis.wave_scale,
+            static_cast<double>(state.wave_tolerance),
+            state.phase_steps,
+            static_cast<std::size_t>(state.phase_test_points));
+        state.status = "Fitted wave phases";
+    } catch (const std::exception& error) {
+        state.status = error.what();
+    }
+}
+
+void save_wave_settings(AppState& state, const std::filesystem::path& path) {
+    const std::filesystem::path output_path = with_wave_settings_extension(path);
+    std::ofstream output(output_path, std::ios::binary);
+    if (!output) {
+        throw std::runtime_error("could not open wave settings for write: " +
+                                 output_path.string());
+    }
+
+    output.write(kWaveSettingsMagic.data(),
+                 static_cast<std::streamsize>(kWaveSettingsMagic.size()));
+    write_binary(output, kWaveSettingsVersion);
+    write_binary(output, state.max_slope);
+    write_binary(output, state.wave_scale);
+    write_binary(output, state.wave_tolerance);
+    write_binary(output, state.phase_steps);
+    write_binary(output, state.phase_test_points);
+    write_binary(output, state.zoom_x);
+    write_binary(output, state.zoom_y);
+
+    const std::uint8_t show_points = state.show_points ? 1 : 0;
+    const std::uint8_t show_lines = state.show_lines ? 1 : 0;
+    const std::uint8_t show_sine = state.show_sine ? 1 : 0;
+    const std::uint8_t show_cosine = state.show_cosine ? 1 : 0;
+    write_binary(output, show_points);
+    write_binary(output, show_lines);
+    write_binary(output, show_sine);
+    write_binary(output, show_cosine);
+
+    const double sine_phase = state.analysis ? state.analysis->sine.phase_radians : 0.0;
+    const double cosine_phase = state.analysis ? state.analysis->cosine.phase_radians : 0.0;
+    write_binary(output, sine_phase);
+    write_binary(output, cosine_phase);
+
+    const auto mapper_count = static_cast<std::uint32_t>(state.mappers.size());
+    write_binary(output, mapper_count);
+    for (const thrystr::ValueMapper& mapper : state.mappers) {
+        const auto kind = static_cast<std::uint32_t>(mapper.kind);
+        const std::uint8_t enabled = mapper.enabled ? 1 : 0;
+        write_binary(output, kind);
+        write_binary(output, mapper.operand);
+        write_binary(output, enabled);
+    }
+
+    copy_to_buffer(state.wave_path, output_path.lexically_normal().string());
+    state.status = "Saved wave settings: " + output_path.filename().string();
+}
+
+void load_wave_settings(AppState& state, const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("could not open wave settings: " + path.string());
+    }
+
+    std::array<char, 8> magic{};
+    input.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+    if (!input || magic != kWaveSettingsMagic) {
+        throw std::runtime_error("not a thrystr wave settings file");
+    }
+
+    const std::uint32_t version = read_binary<std::uint32_t>(input);
+    if (version != kWaveSettingsVersion) {
+        throw std::runtime_error("unsupported wave settings version");
+    }
+
+    state.max_slope = read_binary<float>(input);
+    state.wave_scale = read_binary<float>(input);
+    state.wave_tolerance = read_binary<float>(input);
+    state.phase_steps = read_binary<int>(input);
+    state.phase_test_points = read_binary<int>(input);
+    state.zoom_x = read_binary<float>(input);
+    state.zoom_y = read_binary<float>(input);
+    state.show_points = read_binary<std::uint8_t>(input) != 0;
+    state.show_lines = read_binary<std::uint8_t>(input) != 0;
+    state.show_sine = read_binary<std::uint8_t>(input) != 0;
+    state.show_cosine = read_binary<std::uint8_t>(input) != 0;
+    const double sine_phase = read_binary<double>(input);
+    const double cosine_phase = read_binary<double>(input);
+
+    const std::uint32_t mapper_count = read_binary<std::uint32_t>(input);
+    state.mappers.clear();
+    state.mappers.reserve(mapper_count);
+    for (std::uint32_t i = 0; i < mapper_count; ++i) {
+        const auto kind = static_cast<thrystr::ValueMapperKind>(
+            read_binary<std::uint32_t>(input));
+        const double operand = read_binary<double>(input);
+        const bool enabled = read_binary<std::uint8_t>(input) != 0;
+        state.mappers.push_back({kind, operand, enabled});
+    }
+
+    copy_to_buffer(state.wave_path, path.lexically_normal().string());
+    if (state.path[0] != '\0') {
+        load_path(state);
+        if (state.analysis) {
+            state.analysis->sine.phase_radians = sine_phase;
+            state.analysis->cosine.phase_radians = cosine_phase;
+            state.analysis->wave_scale = static_cast<double>(state.wave_scale);
+        }
+    }
+    state.status = "Loaded wave settings: " + path.filename().string();
+}
+
 void load_path(AppState& state) {
     try {
         state.status = "Analyzing";
@@ -258,6 +430,7 @@ void load_path(AppState& state) {
             std::filesystem::path(state.path),
             thrystr::kDefaultWindowBytes,
             state.max_slope,
+            static_cast<double>(state.wave_scale),
             static_cast<double>(state.wave_tolerance),
             state.phase_steps,
             static_cast<std::size_t>(state.phase_test_points),
@@ -281,18 +454,8 @@ void refresh_analysis_params(AppState& state) {
         thrystr::Analysis& analysis = *state.analysis;
         analysis.max_abs_scalar_delta = thrystr::max_abs_scalar_delta(analysis.scalars);
         analysis.x_scale = thrystr::compute_x_scale(analysis.scalars, state.max_slope);
-        analysis.sine = thrystr::fit_wave_phase(
-            analysis.scalars,
-            false,
-            static_cast<double>(state.wave_tolerance),
-            state.phase_steps,
-            static_cast<std::size_t>(state.phase_test_points));
-        analysis.cosine = thrystr::fit_wave_phase(
-            analysis.scalars,
-            true,
-            static_cast<double>(state.wave_tolerance),
-            state.phase_steps,
-            static_cast<std::size_t>(state.phase_test_points));
+        analysis.wave_scale = static_cast<double>(state.wave_scale);
+        fit_wave_phases(state);
         state.status = "Updated analysis params";
     } catch (const std::exception& error) {
         state.status = error.what();
@@ -305,8 +468,14 @@ void reload_if_file_selected(AppState& state) {
     }
 }
 
-void open_file_dialog(AppState& state) {
-    std::filesystem::path selected(state.path);
+void configure_file_dialog(AppState& state, DialogPurpose purpose) {
+    std::filesystem::path selected;
+    if (purpose == DialogPurpose::OpenSource) {
+        selected = state.path;
+    } else {
+        selected = state.wave_path;
+    }
+
     std::error_code error;
     if (!selected.empty() && std::filesystem::is_regular_file(selected, error)) {
         std::filesystem::path parent = selected.parent_path();
@@ -320,12 +489,27 @@ void open_file_dialog(AppState& state) {
         copy_to_buffer(state.file_dialog.filename, selected.filename().string());
     } else {
         copy_to_buffer(state.file_dialog.cwd, home_or_current_path().string());
-        state.file_dialog.filename[0] = '\0';
+        if (purpose == DialogPurpose::SaveWave) {
+            copy_to_buffer(state.file_dialog.filename, std::string("wave") + kWaveSettingsExtension);
+        } else {
+            state.file_dialog.filename[0] = '\0';
+        }
     }
+
+    if (purpose == DialogPurpose::LoadWave || purpose == DialogPurpose::SaveWave) {
+        copy_to_buffer(state.file_dialog.filter, "thryw");
+    } else {
+        state.file_dialog.filter[0] = '\0';
+    }
+
     state.file_dialog.row_sel = -1;
     state.file_dialog_last_row = -1;
     refresh_file_dialog_entries(state);
-    skald::OpenFileDialog(kOpenFileDialogId);
+}
+
+void request_file_dialog(AppState& state, DialogPurpose purpose) {
+    configure_file_dialog(state, purpose);
+    state.pending_dialog = purpose;
 }
 
 void draw_titlebar(AppState& state) {
@@ -359,22 +543,24 @@ void draw_titlebar(AppState& state) {
     }
 
     ImGui::SameLine(104.0f);
-    ImGui::SetNextItemWidth(std::max(260.0f, viewport.x - 530.0f));
-    if (ImGui::InputTextWithHint("##path", "/path/to/binary",
-                                 state.path, sizeof(state.path),
-                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
-        load_path(state);
+    if (skald::AccentButton("Load Source", ImVec2(116.0f, 0.0f))) {
+        request_file_dialog(state, DialogPurpose::OpenSource);
+    }
+    ImGui::SameLine();
+    if (skald::GhostButton("Load Wave", ImVec2(104.0f, 0.0f))) {
+        request_file_dialog(state, DialogPurpose::LoadWave);
+    }
+    ImGui::SameLine();
+    if (skald::GhostButton("Save Wave", ImVec2(104.0f, 0.0f))) {
+        request_file_dialog(state, DialogPurpose::SaveWave);
     }
 
     ImGui::SameLine();
-    if (skald::AccentButton("Load", ImVec2(76.0f, 0.0f))) {
-        load_path(state);
-    }
-
-    ImGui::SameLine();
-    if (skald::GhostButton("Browse", ImVec2(92.0f, 0.0f))) {
-        open_file_dialog(state);
-    }
+    const std::string source_name = state.path[0] == '\0'
+        ? std::string("source: none")
+        : std::string("source: ") + std::filesystem::path(state.path).filename().string();
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
+                       source_name.c_str());
 
     ImGui::SameLine();
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
@@ -550,6 +736,8 @@ void draw_inspector(AppState& state) {
     bool analysis_params_changed = false;
     analysis_params_changed |= slider_float_row("max slope", "##maxslope",
                                                 &state.max_slope, 0.05f, 1.0f, "%.2f");
+    const bool wave_scale_changed = slider_float_row("wave scale", "##wavescale",
+                                                     &state.wave_scale, 0.05f, 32.0f, "%.3f");
     analysis_params_changed |= slider_float_row("wave tolerance", "##wavetolerance",
                                                 &state.wave_tolerance,
                                                 0.001f, 0.10f, "%.3f");
@@ -559,6 +747,13 @@ void draw_inspector(AppState& state) {
                                               &state.phase_test_points, 1024, 262144);
     if (analysis_params_changed) {
         refresh_analysis_params(state);
+    }
+    if (wave_scale_changed && state.analysis) {
+        state.analysis->wave_scale = static_cast<double>(state.wave_scale);
+        state.status = "Wave scale changed; click Fit Phases";
+    }
+    if (skald::AccentButton("Fit Phases", ImVec2(112.0f, 0.0f))) {
+        fit_wave_phases(state);
     }
 
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -577,6 +772,7 @@ void draw_inspector(AppState& state) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("Wave Fit");
         const thrystr::Analysis& a = *state.analysis;
+        skald::KvRow("scale", "%.4f", a.wave_scale);
         skald::KvRow("sine hits", "%s", format_count(a.sine.hits).c_str());
         skald::KvRow("sine phase", "%.4f", a.sine.phase_radians);
         skald::KvRow("cos hits", "%s", format_count(a.cosine.hits).c_str());
@@ -620,7 +816,7 @@ void draw_wave_overlay(const thrystr::Analysis& analysis,
             : 0.0;
         const double index = static_cast<double>(first) +
                              t * static_cast<double>(last - first);
-        const double theta = 2.0 * kPi * index / denom + phase;
+        const double theta = 2.0 * kPi * analysis.wave_scale * index / denom + phase;
         const float value = static_cast<float>(cosine ? std::cos(theta) : std::sin(theta));
         const ImVec2 point(plot_left + static_cast<float>(index) * x_step,
                            y_for_value(value, plot_top, plot_bottom, zoom_y));
@@ -797,36 +993,81 @@ void navigate_file_dialog_selection(AppState& state) {
 }
 
 void draw_file_dialog(AppState& state) {
+    if (state.pending_dialog != DialogPurpose::None) {
+        state.active_dialog = state.pending_dialog;
+        state.pending_dialog = DialogPurpose::None;
+        skald::OpenFileDialog(kOpenFileDialogId);
+    }
+
+    if (state.active_dialog == DialogPurpose::None) {
+        return;
+    }
+
     refresh_file_dialog_entries(state);
+    const skald::FileDialogMode mode = state.active_dialog == DialogPurpose::SaveWave
+        ? skald::FileDialogMode::Save
+        : skald::FileDialogMode::Open;
     const skald::FileDialogResult result = skald::BeginFileDialog(
         kOpenFileDialogId,
-        skald::FileDialogMode::Open,
+        mode,
         state.file_dialog,
         std::span<const skald::FileDialogEntry>(state.file_dialog_entries.data(),
                                                 state.file_dialog_entries.size()));
 
     navigate_file_dialog_selection(state);
 
+    if (result == skald::FileDialogResult::Cancelled) {
+        state.active_dialog = DialogPurpose::None;
+        return;
+    }
     if (result != skald::FileDialogResult::Confirmed) {
         return;
     }
 
     if (state.file_dialog.filename[0] == '\0') {
         state.status = "Select a file";
+        state.active_dialog = DialogPurpose::None;
         return;
     }
 
     const std::filesystem::path selected =
         std::filesystem::path(state.file_dialog.cwd) / state.file_dialog.filename;
-    copy_to_buffer(state.path, selected.lexically_normal().string());
-    load_path(state);
+    try {
+        switch (state.active_dialog) {
+        case DialogPurpose::OpenSource:
+            copy_to_buffer(state.path, selected.lexically_normal().string());
+            load_path(state);
+            break;
+        case DialogPurpose::LoadWave:
+            load_wave_settings(state, selected.lexically_normal());
+            break;
+        case DialogPurpose::SaveWave:
+            save_wave_settings(state, selected.lexically_normal());
+            break;
+        case DialogPurpose::None:
+            break;
+        }
+    } catch (const std::exception& error) {
+        state.status = error.what();
+    }
+    state.active_dialog = DialogPurpose::None;
 }
 
 void draw_app(AppState& state) {
     draw_titlebar(state);
     draw_inspector(state);
     draw_plot(state);
+    ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
+    ImGui::Begin("##dialog_host", nullptr,
+                 ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_NoInputs |
+                 ImGuiWindowFlags_NoBackground);
     draw_file_dialog(state);
+    ImGui::End();
 }
 
 }  // namespace

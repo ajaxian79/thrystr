@@ -196,6 +196,7 @@ float compute_x_scale(std::span<const float> scalars, float max_slope) {
 
 PhaseFit fit_wave_phase(std::span<const float> scalars,
                         bool cosine,
+                        double wave_scale,
                         double tolerance,
                         int phase_steps,
                         std::size_t max_test_points) {
@@ -203,6 +204,9 @@ PhaseFit fit_wave_phase(std::span<const float> scalars,
     best.tolerance = tolerance;
     if (scalars.empty() || phase_steps <= 0 || max_test_points == 0) {
         return best;
+    }
+    if (!std::isfinite(wave_scale) || wave_scale <= 0.0) {
+        throw std::invalid_argument("wave scale must be positive and finite");
     }
 
     const std::size_t stride = std::max<std::size_t>(1, scalars.size() / max_test_points);
@@ -217,7 +221,8 @@ PhaseFit fit_wave_phase(std::span<const float> scalars,
         std::size_t tested = 0;
 
         for (std::size_t i = 0; i < scalars.size(); i += stride) {
-            const double theta = (2.0 * kPi * static_cast<double>(i) / denom) + phase;
+            const double theta = (2.0 * kPi * wave_scale *
+                                  static_cast<double>(i) / denom) + phase;
             const double wave = cosine ? std::cos(theta) : std::sin(theta);
             if (std::abs(wave - static_cast<double>(scalars[i])) <= tolerance) {
                 ++hits;
@@ -259,6 +264,7 @@ std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
 Analysis analyze_file(const std::filesystem::path& path,
                       std::size_t window_bytes,
                       float max_slope,
+                      double wave_scale,
                       double wave_tolerance,
                       int phase_steps,
                       std::size_t max_phase_test_points,
@@ -287,9 +293,10 @@ Analysis analyze_file(const std::filesystem::path& path,
     analysis.scalars = map_bytes_to_scalars(analysis.mapped_bytes);
     analysis.max_abs_scalar_delta = max_abs_scalar_delta(analysis.scalars);
     analysis.x_scale = compute_x_scale(analysis.scalars, max_slope);
-    analysis.sine = fit_wave_phase(analysis.scalars, false, wave_tolerance,
+    analysis.wave_scale = wave_scale;
+    analysis.sine = fit_wave_phase(analysis.scalars, false, wave_scale, wave_tolerance,
                                    phase_steps, max_phase_test_points);
-    analysis.cosine = fit_wave_phase(analysis.scalars, true, wave_tolerance,
+    analysis.cosine = fit_wave_phase(analysis.scalars, true, wave_scale, wave_tolerance,
                                      phase_steps, max_phase_test_points);
 
     if (analysis.window.delta_index >= analysis.window.offset) {

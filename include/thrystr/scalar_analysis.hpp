@@ -11,6 +11,7 @@ namespace thrystr {
 
 constexpr std::size_t kDefaultWindowBytes = 1024u * 1024u;
 constexpr float kDefaultMaxSlope = 0.25f;
+constexpr double kDefaultWaveScale = 1.0;
 constexpr double kDefaultWaveTolerance = 1.0 / 128.0;
 
 struct WindowEntropy {
@@ -52,6 +53,7 @@ struct Analysis {
     std::vector<ValueMapper> mappers;
     float max_abs_scalar_delta = 0.0f;
     float x_scale = 1.0f;
+    double wave_scale = kDefaultWaveScale;
     PhaseFit sine;
     PhaseFit cosine;
 };
@@ -85,6 +87,7 @@ float compute_x_scale(std::span<const float> scalars,
 
 PhaseFit fit_wave_phase(std::span<const float> scalars,
                         bool cosine,
+                        double wave_scale = kDefaultWaveScale,
                         double tolerance = kDefaultWaveTolerance,
                         int phase_steps = 720,
                         std::size_t max_test_points = 65536);
@@ -94,6 +97,7 @@ std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path);
 Analysis analyze_file(const std::filesystem::path& path,
                       std::size_t window_bytes = kDefaultWindowBytes,
                       float max_slope = kDefaultMaxSlope,
+                      double wave_scale = kDefaultWaveScale,
                       double wave_tolerance = kDefaultWaveTolerance,
                       int phase_steps = 720,
                       std::size_t max_phase_test_points = 65536,
