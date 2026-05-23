@@ -545,11 +545,44 @@ std::pair<double, double> fit_wave_to_selection(const AppState& state) {
     return {best_wavelength, best_phase};
 }
 
+void rebuild_wavelength_modifiers(const AppState& state, WaveEntity& wave) {
+    wave.wavelength_modifiers.clear();
+    if (!state.analysis || state.analysis->scalars.size() < 2) {
+        return;
+    }
+
+    const std::size_t first = state.segment.active
+        ? std::min(state.segment.selection_start, state.segment.selection_end)
+        : 0u;
+    const std::size_t last = state.segment.active
+        ? std::max(state.segment.selection_start, state.segment.selection_end)
+        : state.analysis->scalars.size() - 1u;
+    const double period = data_spatial_period_nm(state);
+    const double tolerance = std::max(0.01, static_cast<double>(state.wave_tolerance));
+    const std::size_t stride = std::max<std::size_t>(1, (last - first + 1u) / 192u);
+    const double max_delta = std::max(period, std::abs(wave.wavelength_nm) * 0.25);
+
+    for (std::size_t index = first; index <= last && index < state.analysis->scalars.size();
+         index += stride) {
+        const double x_nm = static_cast<double>(index) * period;
+        const double residual = state.analysis->scalars[index] - wave_value_at_nm(wave, x_nm);
+        if (std::abs(residual) <= tolerance) {
+            continue;
+        }
+        const double delta_nm = std::clamp(residual * period, -max_delta, max_delta);
+        wave.wavelength_modifiers.push_back({x_nm, delta_nm});
+        if (wave.wavelength_modifiers.size() >= 256u) {
+            break;
+        }
+    }
+}
+
 void create_interpolated_wave(AppState& state) {
     Entity& wave = create_wave_entity(state, "interpolated " + std::to_string(state.wave_serial++));
     const auto [wavelength_nm, phase_nm] = fit_wave_to_selection(state);
     wave.wave.wavelength_nm = wavelength_nm;
     wave.wave.phase_nm = phase_nm;
+    rebuild_wavelength_modifiers(state, wave.wave);
     state.status = "Created interpolated wave";
 }
 
@@ -1404,6 +1437,7 @@ void draw_entity_toolbox(AppState& state) {
             const auto [wavelength_nm, phase_nm] = fit_wave_to_selection(state);
             selected->wave.wavelength_nm = wavelength_nm;
             selected->wave.phase_nm = phase_nm;
+            rebuild_wavelength_modifiers(state, selected->wave);
             state.status = "Fitted " + selected->name + " to selection";
         }
     }
