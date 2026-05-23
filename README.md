@@ -22,7 +22,7 @@ If `THRYSTR_SKALD_SOURCE_DIR` is omitted, CMake fetches Skald from GitHub.
 ./build/thrystr --file /path/to/binary
 ```
 
-In the GUI, use `Browse` to open a file dialog or press Enter in the path field after typing a path. Analysis sliders and mapper changes update the active plot immediately.
+In the GUI, use the toolbar to load a source file, load wave settings, or save wave settings. Wave settings are stored in a small binary `.thryw` file and include render toggles, zoom, mapper stack, wave scale, phase-search controls, and the current fitted phases. The wave scale control changes sine/cosine frequency; use `Fit Phases` to sweep phases against the current scale.
 
 For non-interactive rendering:
 
