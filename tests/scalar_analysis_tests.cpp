@@ -138,6 +138,41 @@ void test_analyze_file_uses_mapper_stack() {
     std::filesystem::remove(path);
 }
 
+void test_analyze_file_streams_best_window_only() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "thrystr_streaming_window_test.bin";
+    {
+        std::ofstream output(path, std::ios::binary);
+        const char bytes[] = {
+            static_cast<char>(10),
+            static_cast<char>(11),
+            static_cast<char>(12),
+            static_cast<char>(20),
+            static_cast<char>(21),
+            static_cast<char>(250),
+            static_cast<char>(1),
+            static_cast<char>(2),
+        };
+        output.write(bytes, sizeof(bytes));
+    }
+
+    const thrystr::Analysis analysis = thrystr::analyze_file(
+        path, 4, thrystr::kDefaultMaxSlope, thrystr::kDefaultWaveScale,
+        thrystr::kDefaultWaveTolerance, 90, 1024);
+
+    assert(analysis.source_size == 8);
+    assert(analysis.window_count == 5);
+    assert(analysis.window.offset == 3);
+    assert(analysis.window.length == 4);
+    assert(analysis.window.max_delta == 249);
+    assert(analysis.window.delta_index == 5);
+    assert((analysis.bytes == std::vector<std::uint8_t>{20, 21, 250, 1}));
+    assert(analysis.bytes == analysis.mapped_bytes);
+    assert(analysis.scalars.size() == 4);
+
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -150,5 +185,6 @@ int main() {
     test_phase_fit_smoke();
     test_phase_fit_respects_wave_scale();
     test_analyze_file_uses_mapper_stack();
+    test_analyze_file_streams_best_window_only();
     return 0;
 }
