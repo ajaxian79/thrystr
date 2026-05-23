@@ -1293,9 +1293,10 @@ void draw_splash(AppState& state) {
     }
 
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(viewport, ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::SetNextWindowPos(ImVec2(0.0f, kTopChromeHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(viewport.x, std::max(120.0f, viewport.y - kTopChromeHeight)),
+                             ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 24.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("##splash_host", nullptr,
                  ImGuiWindowFlags_NoDecoration |
@@ -1305,33 +1306,66 @@ void draw_splash(AppState& state) {
                  ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar(2);
 
-    const std::array<skald::SplashAction, 3> actions = {{
-        {"New workspace", "Ctrl+N"},
-        {"Open workspace", ""},
-        {"Load source", ""},
-    }};
-    const skald::SplashChoice choice = skald::Splash(
-        "thrystr",
-        "scalar wave workspace",
-        std::span<const skald::SplashRecent>(),
-        std::span<const skald::SplashAction>(actions.data(), actions.size()),
-        0,
-        ImVec2(0.0f, 0.0f),
-        state.fonts.sans_md);
+    auto* draw = ImGui::GetWindowDrawList();
+    const ImVec2 min = ImGui::GetWindowPos();
+    const ImVec2 max(min.x + ImGui::GetWindowWidth(), min.y + ImGui::GetWindowHeight());
+    draw->AddRectFilled(min, max, skald::tokens::surface::window);
 
-    if (choice.kind != skald::SplashChoice::Kind::Action) {
+    const float content_width = ImGui::GetContentRegionAvail().x;
+    const float actions_width = std::min(360.0f, std::max(280.0f, content_width * 0.34f));
+    const float right_width = std::max(240.0f, content_width - actions_width - 28.0f);
+
+    ImGui::BeginGroup();
+    if (state.fonts.sans_md) {
+        ImGui::PushFont(state.fonts.sans_md);
+    }
+    ImGui::TextUnformatted("thrystr");
+    if (state.fonts.sans_md) {
+        ImGui::PopFont();
+    }
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
+                       "Scalar wave workspace");
+    ImGui::Dummy(ImVec2(0.0f, 18.0f));
+    skald::SectionHeader("Workspace");
+    if (skald::AccentButton("New workspace", ImVec2(actions_width, 0.0f))) {
+        open_empty_workspace(state);
+        ImGui::EndGroup();
         ImGui::End();
         return;
     }
-    if (choice.index == 0) {
-        open_empty_workspace(state);
-    } else if (choice.index == 1) {
+    if (skald::GhostButton("Open workspace", ImVec2(actions_width, 0.0f))) {
         ensure_workspace(state);
         request_file_dialog(state, DialogPurpose::LoadWave);
-    } else if (choice.index == 2) {
+        ImGui::EndGroup();
+        ImGui::End();
+        return;
+    }
+    if (skald::GhostButton("Load source", ImVec2(actions_width, 0.0f))) {
         ensure_workspace(state);
         request_file_dialog(state, DialogPurpose::OpenSource);
+        ImGui::EndGroup();
+        ImGui::End();
+        return;
     }
+    ImGui::EndGroup();
+
+    ImGui::SameLine(0.0f, 28.0f);
+    ImGui::BeginGroup();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, skald::tokens::to_vec4(skald::tokens::surface::panel));
+    ImGui::BeginChild("##splash_recent", ImVec2(right_width, 270.0f),
+                      ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    skald::SectionHeader("Recent");
+    skald::KvRowStatus("workspaces", "none", skald::BadgeTone::Muted);
+    skald::KvRowStatus("source", "none loaded", skald::BadgeTone::Muted);
+    ImGui::Dummy(ImVec2(0.0f, 14.0f));
+    skald::SectionHeader("Entities");
+    skald::KvRowStatus("data", "empty", skald::BadgeTone::Muted);
+    skald::KvRowStatus("waves", "0", skald::BadgeTone::Muted);
+    ImGui::EndChild();
+    ImGui::EndGroup();
+
     ImGui::End();
 }
 
