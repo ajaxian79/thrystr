@@ -41,6 +41,7 @@ target_compile_options(thrystr_core PRIVATE
 
 if(THRYSTR_BUILD_APP)
     find_package(OpenGL REQUIRED)
+    find_package(X11 QUIET)
 
     find_package(glfw3 QUIET)
     if(NOT glfw3_FOUND AND NOT TARGET glfw)
@@ -91,6 +92,11 @@ if(THRYSTR_BUILD_APP)
         thrystr_stb_image_write
         glfw
         OpenGL::GL)
+    if(X11_FOUND)
+        target_include_directories(thrystr PRIVATE ${X11_INCLUDE_DIR})
+        target_link_libraries(thrystr PRIVATE ${X11_LIBRARIES})
+        target_compile_definitions(thrystr PRIVATE THRYSTR_HAS_X11=1)
+    endif()
     target_compile_definitions(thrystr PRIVATE
         THRYSTR_SKALD_FONT_DIR="${THRYSTR_SKALD_FONT_DIR}")
     target_compile_options(thrystr PRIVATE

@@ -1,6 +1,13 @@
 #include <thrystr/scalar_analysis.hpp>
 
 #include <GLFW/glfw3.h>
+#if defined(THRYSTR_HAS_X11)
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3native.h>
+#include <X11/Xatom.h>
+#undef None
+#undef Success
+#endif
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -29,7 +36,7 @@ namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr float kToolboxWidth = 380.0f;
-constexpr float kTopChromeHeight = 64.0f;
+constexpr float kTopChromeHeight = 44.0f;
 constexpr const char* kOpenFileDialogId = "##open_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
@@ -162,6 +169,55 @@ Args parse_args(int argc, char** argv) {
 
 void glfw_error(int code, const char* message) {
     std::fprintf(stderr, "glfw error %d: %s\n", code, message);
+}
+
+void prefer_x11_when_available() {
+#if defined(__linux__) && defined(GLFW_PLATFORM_X11)
+    if (std::getenv("DISPLAY") != nullptr) {
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+    }
+#endif
+}
+
+void force_undecorated_window(GLFWwindow* window) {
+    if (!window) {
+        return;
+    }
+    glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
+#if defined(THRYSTR_HAS_X11)
+    if (glfwGetPlatform() != GLFW_PLATFORM_X11) {
+        return;
+    }
+
+    Display* display = glfwGetX11Display();
+    const Window xwindow = glfwGetX11Window(window);
+    if (!display || xwindow == 0) {
+        return;
+    }
+
+    struct MotifWmHints {
+        unsigned long flags;
+        unsigned long functions;
+        unsigned long decorations;
+        long input_mode;
+        unsigned long status;
+    };
+
+    constexpr unsigned long kDecorationsFlag = 1UL << 1;
+    MotifWmHints hints{};
+    hints.flags = kDecorationsFlag;
+    hints.decorations = 0;
+    const Atom property = XInternAtom(display, "_MOTIF_WM_HINTS", False);
+    XChangeProperty(display,
+                    xwindow,
+                    property,
+                    property,
+                    32,
+                    PropModeReplace,
+                    reinterpret_cast<const unsigned char*>(&hints),
+                    5);
+    XFlush(display);
+#endif
 }
 
 std::string format_bytes(std::uintmax_t bytes) {
@@ -725,6 +781,7 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
 }
 
 void load_wave_settings(AppState& state, const std::filesystem::path& path) {
+    ensure_workspace(state);
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         throw std::runtime_error("could not open wave settings: " + path.string());
@@ -932,68 +989,27 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(viewport.x, kTopChromeHeight));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 4.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 7.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("##titlebar", nullptr,
                  ImGuiWindowFlags_NoTitleBar |
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_MenuBar |
                  ImGuiWindowFlags_NoBringToFrontOnFocus |
                  ImGuiWindowFlags_NoNavFocus);
     ImGui::PopStyleVar(2);
 
     auto* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilledMultiColor(
-        ImVec2(0.0f, 0.0f), ImVec2(viewport.x, kTopChromeHeight),
-        skald::tokens::surface::deep,
-        skald::tokens::surface::deep,
-        skald::tokens::surface::window,
-        skald::tokens::surface::window);
+    draw->AddRectFilled(ImVec2(0.0f, 0.0f),
+                        ImVec2(viewport.x, kTopChromeHeight),
+                        skald::tokens::surface::deep);
+    draw->AddLine(ImVec2(0.0f, kTopChromeHeight - 1.0f),
+                  ImVec2(viewport.x, kTopChromeHeight - 1.0f),
+                  skald::tokens::border::separator,
+                  1.0f);
 
-    if (ImGui::BeginMenuBar()) {
-        if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("New Workspace")) {
-                open_empty_workspace(state);
-            }
-            if (ImGui::MenuItem("Load Source")) {
-                request_file_dialog(state, DialogPurpose::OpenSource);
-            }
-            if (ImGui::MenuItem("Load Wave Data")) {
-                request_file_dialog(state, DialogPurpose::LoadWave);
-            }
-            if (ImGui::MenuItem("Save Wave Data")) {
-                request_file_dialog(state, DialogPurpose::SaveWave);
-            }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Exit")) {
-                state.request_close = true;
-            }
-            ImGui::EndMenu();
-        }
-        if (ImGui::BeginMenu("Create")) {
-            if (ImGui::MenuItem("Wave", "Ctrl/Cmd+A")) {
-                create_wave_entity(state);
-            }
-            if (ImGui::MenuItem("Interpolated Wave")) {
-                create_interpolated_wave(state);
-            }
-            if (ImGui::MenuItem("X-Line Section")) {
-                create_section(state);
-            }
-            ImGui::EndMenu();
-        }
-        if (ImGui::BeginMenu("Settings")) {
-            if (ImGui::MenuItem("Preferences...")) {
-                state.show_settings = true;
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::EndMenuBar();
-    }
-
-    ImGui::SetCursorPosY(30.0f);
+    ImGui::SetCursorPos(ImVec2(14.0f, 10.0f));
     if (state.fonts.sans_md) {
         ImGui::PushFont(state.fonts.sans_md);
     }
@@ -1002,14 +1018,58 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         ImGui::PopFont();
     }
 
-    ImGui::SameLine(100.0f);
-    if (skald::AccentButton("Create", ImVec2(82.0f, 0.0f))) {
-        create_wave_entity(state);
+    ImGui::SameLine(96.0f);
+    if (skald::GhostButton("File", ImVec2(52.0f, 0.0f))) {
+        ImGui::OpenPopup("##file_menu");
     }
+    if (ImGui::BeginPopup("##file_menu")) {
+        if (ImGui::MenuItem("New Workspace")) {
+            open_empty_workspace(state);
+        }
+        if (ImGui::MenuItem("Load Source")) {
+            request_file_dialog(state, DialogPurpose::OpenSource);
+        }
+        if (ImGui::MenuItem("Load Wave Data")) {
+            request_file_dialog(state, DialogPurpose::LoadWave);
+        }
+        if (ImGui::MenuItem("Save Wave Data")) {
+            request_file_dialog(state, DialogPurpose::SaveWave);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Exit")) {
+            state.request_close = true;
+        }
+        ImGui::EndPopup();
+    }
+
     ImGui::SameLine();
-    if (skald::GhostButton("Section", ImVec2(86.0f, 0.0f))) {
-        create_section(state);
+    if (skald::GhostButton("Create", ImVec2(70.0f, 0.0f))) {
+        ImGui::OpenPopup("##create_menu");
     }
+    if (ImGui::BeginPopup("##create_menu")) {
+        if (ImGui::MenuItem("Wave", "Ctrl/Cmd+A")) {
+            create_wave_entity(state);
+        }
+        if (ImGui::MenuItem("Interpolated Wave")) {
+            create_interpolated_wave(state);
+        }
+        if (ImGui::MenuItem("X-Line Section")) {
+            create_section(state);
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+    if (skald::GhostButton("Settings", ImVec2(82.0f, 0.0f))) {
+        ImGui::OpenPopup("##settings_menu");
+    }
+    if (ImGui::BeginPopup("##settings_menu")) {
+        if (ImGui::MenuItem("Preferences...")) {
+            state.show_settings = true;
+        }
+        ImGui::EndPopup();
+    }
+
     ImGui::SameLine();
     if (skald::AccentButton("Load Source", ImVec2(116.0f, 0.0f))) {
         request_file_dialog(state, DialogPurpose::OpenSource);
@@ -1019,7 +1079,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         request_file_dialog(state, DialogPurpose::LoadWave);
     }
     ImGui::SameLine();
-    if (skald::GhostButton("Save Wave", ImVec2(104.0f, 0.0f))) {
+    if (skald::GhostButton("Save", ImVec2(62.0f, 0.0f))) {
         request_file_dialog(state, DialogPurpose::SaveWave);
     }
 
@@ -1035,7 +1095,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
                        state.status.c_str());
 
     const float controls_width = 96.0f;
-    ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 29.0f));
+    ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 9.0f));
     if (skald::IconButton("-", "Minimize", 26.0f)) {
         glfwIconifyWindow(window);
     }
@@ -1369,14 +1429,12 @@ void draw_splash(AppState& state) {
         return;
     }
     if (skald::GhostButton("Open workspace", ImVec2(actions_width, 0.0f))) {
-        ensure_workspace(state);
         request_file_dialog(state, DialogPurpose::LoadWave);
         ImGui::EndGroup();
         ImGui::End();
         return;
     }
     if (skald::GhostButton("Load source", ImVec2(actions_width, 0.0f))) {
-        ensure_workspace(state);
         request_file_dialog(state, DialogPurpose::OpenSource);
         ImGui::EndGroup();
         ImGui::End();
@@ -1456,7 +1514,7 @@ void draw_entity_toolbox(AppState& state) {
             skald::KvRowStatus("source", "none", skald::BadgeTone::Muted);
         }
         if (data &&
-            value_bar_double("spatial period nm", &data->data.spatial_period_nm,
+            value_bar_double("point spacing nm", &data->data.spatial_period_nm,
                              0.01, "%.6f")) {
             data->data.spatial_period_nm =
                 std::max(0.000001, data->data.spatial_period_nm);
@@ -1549,7 +1607,7 @@ void draw_entity_toolbox(AppState& state) {
     } else {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("Wave");
-        value_bar_double("wavelength nm", &selected->wave.wavelength_nm, 0.10, "%.4f");
+        value_bar_double("wave spatial distance nm", &selected->wave.wavelength_nm, 0.10, "%.4f");
         value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f");
         value_bar_double("amplitude offset", &selected->wave.amplitude_offset, 0.01, "%.4f");
         value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f");
@@ -1571,6 +1629,17 @@ float y_for_value(float value, float top, float bottom, float zoom_y) {
     const float scaled = value * zoom_y;
     const float normalized = (scaled + 1.0f) * 0.5f;
     return bottom - normalized * (bottom - top);
+}
+
+float plot_x_step(const AppState& state) {
+    if (!state.analysis) {
+        return 1.0f;
+    }
+    const float slope_step = std::max(0.05f, state.analysis->x_scale);
+    const float point_spacing =
+        static_cast<float>(std::clamp(data_spatial_period_nm(state), 0.000001, 1.0e6));
+    const float zoom = std::max(0.01f, std::abs(state.zoom_x));
+    return std::max(0.05f, std::max(slope_step, point_spacing) * zoom);
 }
 
 void draw_plot(AppState& state) {
@@ -1605,7 +1674,7 @@ void draw_plot(AppState& state) {
     const std::size_t count = analysis.scalars.size();
     state.segment.selection_start = std::min(state.segment.selection_start, count - 1u);
     state.segment.selection_end = std::min(state.segment.selection_end, count - 1u);
-    const float x_step = std::max(0.05f, analysis.x_scale * std::max(0.01f, std::abs(state.zoom_x)));
+    const float x_step = plot_x_step(state);
     const float y_zoom = std::max(0.01f, std::abs(state.zoom_y));
     const double period_nm = data_spatial_period_nm(state);
     const ImVec2 available = ImGui::GetContentRegionAvail();
@@ -1645,8 +1714,7 @@ void draw_plot(AppState& state) {
                 0.0f,
                 static_cast<float>(count - 1u));
             state.zoom_x = std::max(0.01f, state.zoom_x * factor);
-            const float new_step =
-                std::max(0.05f, analysis.x_scale * std::max(0.01f, std::abs(state.zoom_x)));
+            const float new_step = plot_x_step(state);
             const float mouse_local_x = io.MousePos.x - child_pos.x;
             ImGui::SetScrollX(std::max(0.0f, mouse_index * new_step + margin_left - mouse_local_x));
         }
@@ -1958,6 +2026,7 @@ int main(int argc, char** argv) {
     const Args args = parse_args(argc, argv);
 
     glfwSetErrorCallback(glfw_error);
+    prefer_x11_when_available();
     if (!glfwInit()) {
         return 1;
     }
@@ -1965,11 +2034,14 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow* window = glfwCreateWindow(args.width, args.height, "thrystr", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
     }
+    force_undecorated_window(window);
+    glfwShowWindow(window);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
