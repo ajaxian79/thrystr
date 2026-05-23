@@ -37,6 +37,10 @@ namespace {
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr float kToolboxWidth = 380.0f;
 constexpr float kTopChromeHeight = 44.0f;
+constexpr double kChromeResizeMargin = 8.0;
+constexpr int kMinWindowWidth = 760;
+constexpr int kMinWindowHeight = 460;
+constexpr std::uintmax_t kLargeSourcePhaseFitDeferBytes = 128ull * 1024ull * 1024ull;
 constexpr const char* kOpenFileDialogId = "##open_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
@@ -96,6 +100,26 @@ struct FileBrowserEntry {
     bool is_folder = false;
 };
 
+enum class ChromeAction {
+    None,
+    Move,
+    ResizeLeft,
+    ResizeRight,
+    ResizeTop,
+    ResizeBottom,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
+    ResizeBottomRight,
+};
+
+struct ChromeCursors {
+    GLFWcursor* hresize = nullptr;
+    GLFWcursor* vresize = nullptr;
+    GLFWcursor* nwse = nullptr;
+    GLFWcursor* nesw = nullptr;
+};
+
 struct AppState {
     char path[4096] = {};
     char wave_path[4096] = {};
@@ -115,11 +139,13 @@ struct AppState {
     bool show_settings = false;
     bool show_inspector_overlay = false;
     bool request_close = false;
-    bool chrome_dragging = false;
-    double chrome_drag_x = 0.0;
-    double chrome_drag_y = 0.0;
-    int chrome_window_x = 0;
-    int chrome_window_y = 0;
+    ChromeAction chrome_action = ChromeAction::None;
+    double chrome_start_global_x = 0.0;
+    double chrome_start_global_y = 0.0;
+    int chrome_start_window_x = 0;
+    int chrome_start_window_y = 0;
+    int chrome_start_window_w = 0;
+    int chrome_start_window_h = 0;
     bool show_points = true;
     bool show_lines = true;
     bool show_sine = true;
@@ -218,6 +244,242 @@ void force_undecorated_window(GLFWwindow* window) {
                     5);
     XFlush(display);
 #endif
+}
+
+ChromeCursors create_chrome_cursors() {
+    ChromeCursors cursors;
+    cursors.hresize = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
+    cursors.vresize = glfwCreateStandardCursor(GLFW_VRESIZE_CURSOR);
+    cursors.nwse = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
+    cursors.nesw = glfwCreateStandardCursor(GLFW_RESIZE_NESW_CURSOR);
+    return cursors;
+}
+
+void destroy_chrome_cursors(ChromeCursors& cursors) {
+    if (cursors.hresize) {
+        glfwDestroyCursor(cursors.hresize);
+        cursors.hresize = nullptr;
+    }
+    if (cursors.vresize) {
+        glfwDestroyCursor(cursors.vresize);
+        cursors.vresize = nullptr;
+    }
+    if (cursors.nwse) {
+        glfwDestroyCursor(cursors.nwse);
+        cursors.nwse = nullptr;
+    }
+    if (cursors.nesw) {
+        glfwDestroyCursor(cursors.nesw);
+        cursors.nesw = nullptr;
+    }
+}
+
+bool chrome_action_is_resize(ChromeAction action) {
+    return action != ChromeAction::None && action != ChromeAction::Move;
+}
+
+bool chrome_action_has_left(ChromeAction action) {
+    return action == ChromeAction::ResizeLeft ||
+           action == ChromeAction::ResizeTopLeft ||
+           action == ChromeAction::ResizeBottomLeft;
+}
+
+bool chrome_action_has_right(ChromeAction action) {
+    return action == ChromeAction::ResizeRight ||
+           action == ChromeAction::ResizeTopRight ||
+           action == ChromeAction::ResizeBottomRight;
+}
+
+bool chrome_action_has_top(ChromeAction action) {
+    return action == ChromeAction::ResizeTop ||
+           action == ChromeAction::ResizeTopLeft ||
+           action == ChromeAction::ResizeTopRight;
+}
+
+bool chrome_action_has_bottom(ChromeAction action) {
+    return action == ChromeAction::ResizeBottom ||
+           action == ChromeAction::ResizeBottomLeft ||
+           action == ChromeAction::ResizeBottomRight;
+}
+
+ChromeAction resize_action_at(double cursor_x,
+                              double cursor_y,
+                              int window_w,
+                              int window_h) {
+    const bool left = cursor_x >= 0.0 && cursor_x <= kChromeResizeMargin;
+    const bool right = cursor_x <= static_cast<double>(window_w) &&
+                       cursor_x >= static_cast<double>(window_w) - kChromeResizeMargin;
+    const bool top = cursor_y >= 0.0 && cursor_y <= kChromeResizeMargin;
+    const bool bottom = cursor_y <= static_cast<double>(window_h) &&
+                        cursor_y >= static_cast<double>(window_h) - kChromeResizeMargin;
+
+    if (top && left) {
+        return ChromeAction::ResizeTopLeft;
+    }
+    if (top && right) {
+        return ChromeAction::ResizeTopRight;
+    }
+    if (bottom && left) {
+        return ChromeAction::ResizeBottomLeft;
+    }
+    if (bottom && right) {
+        return ChromeAction::ResizeBottomRight;
+    }
+    if (top) {
+        return ChromeAction::ResizeTop;
+    }
+    if (bottom) {
+        return ChromeAction::ResizeBottom;
+    }
+    if (left) {
+        return ChromeAction::ResizeLeft;
+    }
+    if (right) {
+        return ChromeAction::ResizeRight;
+    }
+    return ChromeAction::None;
+}
+
+GLFWcursor* cursor_for_action(const ChromeCursors& cursors, ChromeAction action) {
+    switch (action) {
+    case ChromeAction::ResizeLeft:
+    case ChromeAction::ResizeRight:
+        return cursors.hresize;
+    case ChromeAction::ResizeTop:
+    case ChromeAction::ResizeBottom:
+        return cursors.vresize;
+    case ChromeAction::ResizeTopLeft:
+    case ChromeAction::ResizeBottomRight:
+        return cursors.nwse;
+    case ChromeAction::ResizeTopRight:
+    case ChromeAction::ResizeBottomLeft:
+        return cursors.nesw;
+    case ChromeAction::Move:
+    case ChromeAction::None:
+        return nullptr;
+    }
+    return nullptr;
+}
+
+std::pair<double, double> global_cursor_position(GLFWwindow* window,
+                                                 double cursor_x,
+                                                 double cursor_y) {
+    int window_x = 0;
+    int window_y = 0;
+    glfwGetWindowPos(window, &window_x, &window_y);
+    return {
+        static_cast<double>(window_x) + cursor_x,
+        static_cast<double>(window_y) + cursor_y,
+    };
+}
+
+void begin_chrome_action(AppState& state,
+                         GLFWwindow* window,
+                         ChromeAction action,
+                         double cursor_x,
+                         double cursor_y) {
+    state.chrome_action = action;
+    const auto [global_x, global_y] = global_cursor_position(window, cursor_x, cursor_y);
+    state.chrome_start_global_x = global_x;
+    state.chrome_start_global_y = global_y;
+    glfwGetWindowPos(window, &state.chrome_start_window_x, &state.chrome_start_window_y);
+    glfwGetWindowSize(window, &state.chrome_start_window_w, &state.chrome_start_window_h);
+}
+
+void update_chrome_action(AppState& state,
+                          GLFWwindow* window,
+                          double cursor_x,
+                          double cursor_y) {
+    const auto [global_x, global_y] = global_cursor_position(window, cursor_x, cursor_y);
+    const int dx = static_cast<int>(std::lround(global_x - state.chrome_start_global_x));
+    const int dy = static_cast<int>(std::lround(global_y - state.chrome_start_global_y));
+
+    if (state.chrome_action == ChromeAction::Move) {
+        glfwSetWindowPos(window,
+                         state.chrome_start_window_x + dx,
+                         state.chrome_start_window_y + dy);
+        return;
+    }
+
+    int x = state.chrome_start_window_x;
+    int y = state.chrome_start_window_y;
+    int w = state.chrome_start_window_w;
+    int h = state.chrome_start_window_h;
+
+    if (chrome_action_has_left(state.chrome_action)) {
+        x = state.chrome_start_window_x + dx;
+        w = state.chrome_start_window_w - dx;
+        if (w < kMinWindowWidth) {
+            x = state.chrome_start_window_x + state.chrome_start_window_w - kMinWindowWidth;
+            w = kMinWindowWidth;
+        }
+    } else if (chrome_action_has_right(state.chrome_action)) {
+        w = std::max(kMinWindowWidth, state.chrome_start_window_w + dx);
+    }
+
+    if (chrome_action_has_top(state.chrome_action)) {
+        y = state.chrome_start_window_y + dy;
+        h = state.chrome_start_window_h - dy;
+        if (h < kMinWindowHeight) {
+            y = state.chrome_start_window_y + state.chrome_start_window_h - kMinWindowHeight;
+            h = kMinWindowHeight;
+        }
+    } else if (chrome_action_has_bottom(state.chrome_action)) {
+        h = std::max(kMinWindowHeight, state.chrome_start_window_h + dy);
+    }
+
+    glfwSetWindowPos(window, x, y);
+    glfwSetWindowSize(window, w, h);
+}
+
+void handle_custom_chrome(AppState& state,
+                          GLFWwindow* window,
+                          const ChromeCursors& cursors) {
+    if (!window || glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
+        return;
+    }
+
+    double cursor_x = 0.0;
+    double cursor_y = 0.0;
+    glfwGetCursorPos(window, &cursor_x, &cursor_y);
+
+    int window_w = 0;
+    int window_h = 0;
+    glfwGetWindowSize(window, &window_w, &window_h);
+
+    if (state.chrome_action != ChromeAction::None) {
+        glfwSetCursor(window, cursor_for_action(cursors, state.chrome_action));
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            update_chrome_action(state, window, cursor_x, cursor_y);
+        } else {
+            state.chrome_action = ChromeAction::None;
+            glfwSetCursor(window, nullptr);
+        }
+        return;
+    }
+
+    if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
+        glfwSetCursor(window, nullptr);
+        return;
+    }
+
+    const ChromeAction resize_action =
+        resize_action_at(cursor_x, cursor_y, window_w, window_h);
+    const bool resize_hovered = chrome_action_is_resize(resize_action);
+    const bool titlebar_hovered =
+        cursor_y >= 0.0 && cursor_y <= static_cast<double>(kTopChromeHeight);
+    const bool item_hovered = ImGui::IsAnyItemHovered();
+    const ChromeAction hover_action =
+        resize_hovered ? resize_action
+                       : (titlebar_hovered && !item_hovered ? ChromeAction::Move
+                                                            : ChromeAction::None);
+
+    glfwSetCursor(window, cursor_for_action(cursors, hover_action));
+
+    if (hover_action != ChromeAction::None &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        begin_chrome_action(state, window, hover_action, cursor_x, cursor_y);
+    }
 }
 
 std::string format_bytes(std::uintmax_t bytes) {
@@ -679,6 +941,12 @@ void create_interpolated_wave(AppState& state) {
 
 void load_path(AppState& state);
 
+bool should_defer_phase_fit_on_load(const std::filesystem::path& path) {
+    std::error_code error;
+    const std::uintmax_t file_size = std::filesystem::file_size(path, error);
+    return !error && file_size >= kLargeSourcePhaseFitDeferBytes;
+}
+
 void fit_wave_phases(AppState& state) {
     if (!state.analysis) {
         return;
@@ -890,14 +1158,16 @@ void load_path(AppState& state) {
     try {
         ensure_workspace(state);
         state.status = "Analyzing";
+        const std::filesystem::path source_path(state.path);
+        const bool phase_fit_deferred = should_defer_phase_fit_on_load(source_path);
         state.analysis = thrystr::analyze_file(
-            std::filesystem::path(state.path),
+            source_path,
             thrystr::kDefaultWindowBytes,
             state.max_slope,
             static_cast<double>(state.wave_scale),
             static_cast<double>(state.wave_tolerance),
             state.phase_steps,
-            static_cast<std::size_t>(state.phase_test_points),
+            phase_fit_deferred ? 0u : static_cast<std::size_t>(state.phase_test_points),
             state.mappers);
 
         const auto& analysis = *state.analysis;
@@ -912,6 +1182,9 @@ void load_path(AppState& state) {
         }
         state.status = "Loaded " + analysis.source_path.filename().string() +
                        " / sample " + format_bytes(analysis.window.length);
+        if (phase_fit_deferred) {
+            state.status += " / phase fit deferred";
+        }
     } catch (const std::exception& error) {
         state.analysis.reset();
         state.status = error.what();
@@ -1110,27 +1383,6 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     ImGui::SameLine();
     if (skald::IconButton("x", "Close", 26.0f)) {
         state.request_close = true;
-    }
-
-    if (window && ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        state.chrome_dragging = true;
-        glfwGetCursorPos(window, &state.chrome_drag_x, &state.chrome_drag_y);
-        glfwGetWindowPos(window, &state.chrome_window_x, &state.chrome_window_y);
-    }
-    if (state.chrome_dragging) {
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            double cursor_x = 0.0;
-            double cursor_y = 0.0;
-            glfwGetCursorPos(window, &cursor_x, &cursor_y);
-            glfwSetWindowPos(window,
-                             state.chrome_window_x +
-                                 static_cast<int>(cursor_x - state.chrome_drag_x),
-                             state.chrome_window_y +
-                                 static_cast<int>(cursor_y - state.chrome_drag_y));
-        } else {
-            state.chrome_dragging = false;
-        }
     }
 
     ImGui::End();
@@ -1999,7 +2251,7 @@ void handle_shortcuts(AppState& state) {
     }
 }
 
-void draw_app(AppState& state, GLFWwindow* window) {
+void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors) {
     handle_shortcuts(state);
     draw_titlebar(state, window);
     draw_plot(state);
@@ -2018,6 +2270,7 @@ void draw_app(AppState& state, GLFWwindow* window) {
                  ImGuiWindowFlags_NoBackground);
     draw_file_dialog(state);
     ImGui::End();
+    handle_custom_chrome(state, window, cursors);
 }
 
 }  // namespace
@@ -2041,9 +2294,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     force_undecorated_window(window);
+    glfwSetWindowSizeLimits(window,
+                            kMinWindowWidth,
+                            kMinWindowHeight,
+                            GLFW_DONT_CARE,
+                            GLFW_DONT_CARE);
     glfwShowWindow(window);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+    ChromeCursors chrome_cursors = create_chrome_cursors();
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -2071,7 +2330,7 @@ int main(int argc, char** argv) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        draw_app(state, window);
+        draw_app(state, window, chrome_cursors);
         if (state.request_close) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
@@ -2098,6 +2357,7 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    destroy_chrome_cursors(chrome_cursors);
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;

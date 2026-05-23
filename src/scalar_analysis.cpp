@@ -1,18 +1,310 @@
 #include <thrystr/scalar_analysis.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <system_error>
+#if defined(__unix__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace thrystr {
 namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
+constexpr std::size_t kScanChunkBytes = 8u * 1024u * 1024u;
+
+struct WindowScanResult {
+    WindowEntropy window;
+    std::size_t source_size = 0;
+    std::size_t window_count = 0;
+    std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> mapped_bytes;
+};
 
 std::uint8_t delta_at(std::span<const std::uint8_t> bytes, std::size_t index) {
     return adjacent_delta(bytes[index], bytes[index + 1]);
+}
+
+std::size_t file_size_or_throw(const std::filesystem::path& path) {
+    std::error_code error;
+    const std::uintmax_t file_size = std::filesystem::file_size(path, error);
+    if (error) {
+        throw std::runtime_error("could not determine file size: " + path.string());
+    }
+    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error("file too large for this build: " + path.string());
+    }
+    return static_cast<std::size_t>(file_size);
+}
+
+bool has_enabled_mappers(std::span<const ValueMapper> mappers) {
+    return std::any_of(mappers.begin(), mappers.end(), [](const ValueMapper& mapper) {
+        return mapper.enabled;
+    });
+}
+
+void copy_window_from_ring(std::vector<std::uint8_t>& output,
+                           const std::vector<std::uint8_t>& ring,
+                           std::size_t offset,
+                           std::size_t length) {
+    output.resize(length);
+    for (std::size_t i = 0; i < length; ++i) {
+        output[i] = ring[(offset + i) % length];
+    }
+}
+
+WindowScanResult scan_highest_entropy_window_stream(const std::filesystem::path& path,
+                                                    std::size_t window_bytes,
+                                                    std::span<const ValueMapper> mappers) {
+    WindowScanResult result;
+    result.source_size = file_size_or_throw(path);
+    if (result.source_size == 0 || window_bytes == 0) {
+        return result;
+    }
+
+    const std::size_t window_length = std::min(window_bytes, result.source_size);
+    result.window = WindowEntropy{0, window_length, 0, 0};
+    result.window_count = result.source_size - window_length + 1u;
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("could not open file: " + path.string());
+    }
+
+    if (window_length == 1u) {
+        char byte = 0;
+        input.read(&byte, 1);
+        if (!input) {
+            throw std::runtime_error("could not read file: " + path.string());
+        }
+        const std::uint8_t source_byte = static_cast<std::uint8_t>(byte);
+        result.bytes = {source_byte};
+        result.mapped_bytes = {
+            has_enabled_mappers(mappers) ? map_byte_to_wrapped(source_byte, mappers)
+                                         : source_byte,
+        };
+        return result;
+    }
+
+    std::vector<std::uint8_t> source_ring(window_length);
+    std::vector<std::uint8_t> mapped_ring(window_length);
+    const std::size_t delta_span = window_length > 1u ? window_length - 1u : 0u;
+    std::vector<std::uint8_t> delta_ring(delta_span == 0u ? 1u : delta_span);
+    std::array<std::uint32_t, 256> delta_counts{};
+    std::vector<char> chunk(kScanChunkBytes);
+    const bool map_values = has_enabled_mappers(mappers);
+
+    std::size_t index = 0;
+    std::uint8_t previous_mapped = 0;
+    std::uint8_t current_max_delta = 0;
+    bool have_previous = false;
+    bool have_best_window = false;
+    bool stop_scanning = false;
+
+    while (input && !stop_scanning) {
+        input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        const std::streamsize read_count = input.gcount();
+        if (read_count < 0) {
+            throw std::runtime_error("could not read file: " + path.string());
+        }
+
+        for (std::streamsize i = 0; i < read_count && !stop_scanning; ++i) {
+            const std::uint8_t source_byte = static_cast<std::uint8_t>(chunk[static_cast<std::size_t>(i)]);
+            const std::uint8_t mapped_byte = map_values
+                ? map_byte_to_wrapped(source_byte, mappers)
+                : source_byte;
+            source_ring[index % window_length] = source_byte;
+            mapped_ring[index % window_length] = mapped_byte;
+
+            if (have_previous) {
+                const std::size_t delta_index = index - 1u;
+                const std::uint8_t delta = adjacent_delta(previous_mapped, mapped_byte);
+                if (delta_index >= delta_span) {
+                    const std::size_t expired_index = delta_index - delta_span;
+                    const std::uint8_t expired_delta =
+                        delta_ring[expired_index % delta_span];
+                    --delta_counts[expired_delta];
+                    while (current_max_delta > 0u &&
+                           delta_counts[current_max_delta] == 0u) {
+                        --current_max_delta;
+                    }
+                }
+                delta_ring[delta_index % delta_span] = delta;
+                ++delta_counts[delta];
+                current_max_delta = std::max(current_max_delta, delta);
+
+                if (delta_index + 1u >= delta_span) {
+                    const std::size_t window_offset = delta_index + 1u - delta_span;
+                    const std::uint8_t max_delta = current_max_delta;
+                    if (!have_best_window || max_delta > result.window.max_delta) {
+                        std::size_t max_delta_index = window_offset;
+                        const std::size_t max_delta_end = window_offset + delta_span;
+                        for (std::size_t candidate = window_offset;
+                             candidate < max_delta_end;
+                             ++candidate) {
+                            if (delta_ring[candidate % delta_span] == max_delta) {
+                                max_delta_index = candidate;
+                                break;
+                            }
+                        }
+                        result.window = WindowEntropy{
+                            window_offset,
+                            window_length,
+                            max_delta,
+                            max_delta_index,
+                        };
+                        copy_window_from_ring(result.bytes,
+                                              source_ring,
+                                              window_offset,
+                                              window_length);
+                        copy_window_from_ring(result.mapped_bytes,
+                                              mapped_ring,
+                                              window_offset,
+                                              window_length);
+                        have_best_window = true;
+                        stop_scanning =
+                            max_delta == std::numeric_limits<std::uint8_t>::max();
+                    }
+                }
+            }
+
+            previous_mapped = mapped_byte;
+            have_previous = true;
+            ++index;
+        }
+    }
+
+    if (!stop_scanning && !input.eof()) {
+        throw std::runtime_error("could not read file: " + path.string());
+    }
+    if (!stop_scanning && index != result.source_size) {
+        throw std::runtime_error("file size changed while reading: " + path.string());
+    }
+
+    if (!have_best_window && result.source_size == 1u) {
+        result.bytes = {source_ring[0]};
+        result.mapped_bytes = {mapped_ring[0]};
+    }
+
+    return result;
+}
+
+#if defined(__unix__)
+WindowScanResult scan_highest_entropy_window_mapped(const std::filesystem::path& path,
+                                                    std::size_t window_bytes) {
+    WindowScanResult result;
+    result.source_size = file_size_or_throw(path);
+    if (result.source_size == 0 || window_bytes == 0) {
+        return result;
+    }
+
+    const std::size_t window_length = std::min(window_bytes, result.source_size);
+    result.window = WindowEntropy{0, window_length, 0, 0};
+    result.window_count = result.source_size - window_length + 1u;
+
+    const int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw std::runtime_error("could not open file: " + path.string());
+    }
+
+    void* mapping = mmap(nullptr, result.source_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapping == MAP_FAILED) {
+        return scan_highest_entropy_window_stream(path, window_bytes, {});
+    }
+
+#if defined(MADV_SEQUENTIAL)
+    madvise(mapping, result.source_size, MADV_SEQUENTIAL);
+#endif
+
+    const auto* bytes = static_cast<const std::uint8_t*>(mapping);
+    if (window_length == 1u) {
+        result.bytes = {bytes[0]};
+        result.mapped_bytes = result.bytes;
+        munmap(mapping, result.source_size);
+        return result;
+    }
+
+    const std::size_t delta_span = window_length - 1u;
+    std::vector<std::uint8_t> delta_ring(delta_span);
+    std::array<std::uint32_t, 256> delta_counts{};
+    std::uint8_t current_max_delta = 0;
+    bool have_best_window = false;
+
+    for (std::size_t delta_index = 0; delta_index + 1u < result.source_size;
+         ++delta_index) {
+        if (delta_index >= delta_span) {
+            const std::size_t expired_index = delta_index - delta_span;
+            const std::uint8_t expired_delta = delta_ring[expired_index % delta_span];
+            --delta_counts[expired_delta];
+            while (current_max_delta > 0u && delta_counts[current_max_delta] == 0u) {
+                --current_max_delta;
+            }
+        }
+
+        const int diff = static_cast<int>(bytes[delta_index]) -
+                         static_cast<int>(bytes[delta_index + 1u]);
+        const std::uint8_t delta = static_cast<std::uint8_t>(std::abs(diff));
+        delta_ring[delta_index % delta_span] = delta;
+        ++delta_counts[delta];
+        current_max_delta = std::max(current_max_delta, delta);
+
+        if (delta_index + 1u < delta_span) {
+            continue;
+        }
+
+        const std::size_t window_offset = delta_index + 1u - delta_span;
+        const std::uint8_t max_delta = current_max_delta;
+        if (!have_best_window || max_delta > result.window.max_delta) {
+            std::size_t max_delta_index = window_offset;
+            const std::size_t max_delta_end = window_offset + delta_span;
+            for (std::size_t candidate = window_offset;
+                 candidate < max_delta_end;
+                 ++candidate) {
+                if (delta_ring[candidate % delta_span] == max_delta) {
+                    max_delta_index = candidate;
+                    break;
+                }
+            }
+            result.window = WindowEntropy{
+                window_offset,
+                window_length,
+                max_delta,
+                max_delta_index,
+            };
+            have_best_window = true;
+            if (max_delta == std::numeric_limits<std::uint8_t>::max()) {
+                break;
+            }
+        }
+    }
+
+    result.bytes.assign(bytes + result.window.offset,
+                        bytes + result.window.offset + window_length);
+    result.mapped_bytes = result.bytes;
+    munmap(mapping, result.source_size);
+    return result;
+}
+#endif
+
+WindowScanResult scan_highest_entropy_window(const std::filesystem::path& path,
+                                             std::size_t window_bytes,
+                                             std::span<const ValueMapper> mappers) {
+    if (!has_enabled_mappers(mappers)) {
+#if defined(__unix__)
+        return scan_highest_entropy_window_mapped(path, window_bytes);
+#else
+        return scan_highest_entropy_window_stream(path, window_bytes, {});
+#endif
+    }
+    return scan_highest_entropy_window_stream(path, window_bytes, mappers);
 }
 
 }  // namespace
@@ -269,27 +561,17 @@ Analysis analyze_file(const std::filesystem::path& path,
                       int phase_steps,
                       std::size_t max_phase_test_points,
                       std::span<const ValueMapper> mappers) {
-    std::vector<std::uint8_t> source = read_file_bytes(path);
-    std::vector<std::uint8_t> mapped_source = map_bytes_to_wrapped(source, mappers);
+    const WindowScanResult scan =
+        scan_highest_entropy_window(path, window_bytes, mappers);
 
     Analysis analysis;
     analysis.source_path = path;
-    analysis.source_size = source.size();
+    analysis.source_size = scan.source_size;
     analysis.mappers.assign(mappers.begin(), mappers.end());
-    analysis.window = find_highest_entropy_window(mapped_source, window_bytes);
-    analysis.window_count = mapped_source.empty()
-        ? 0
-        : mapped_source.size() - analysis.window.length + 1;
-
-    const auto begin = source.begin() + static_cast<std::ptrdiff_t>(analysis.window.offset);
-    const auto end = begin + static_cast<std::ptrdiff_t>(analysis.window.length);
-    analysis.bytes.assign(begin, end);
-
-    const auto mapped_begin = mapped_source.begin() +
-        static_cast<std::ptrdiff_t>(analysis.window.offset);
-    const auto mapped_end = mapped_begin +
-        static_cast<std::ptrdiff_t>(analysis.window.length);
-    analysis.mapped_bytes.assign(mapped_begin, mapped_end);
+    analysis.window = scan.window;
+    analysis.window_count = scan.window_count;
+    analysis.bytes = scan.bytes;
+    analysis.mapped_bytes = scan.mapped_bytes;
     analysis.scalars = map_bytes_to_scalars(analysis.mapped_bytes);
     analysis.max_abs_scalar_delta = max_abs_scalar_delta(analysis.scalars);
     analysis.x_scale = compute_x_scale(analysis.scalars, max_slope);
