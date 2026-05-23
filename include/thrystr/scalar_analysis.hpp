@@ -27,6 +27,19 @@ struct PhaseFit {
     double tolerance = kDefaultWaveTolerance;
 };
 
+enum class ValueMapperKind {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+};
+
+struct ValueMapper {
+    ValueMapperKind kind = ValueMapperKind::Add;
+    double operand = 0.0;
+    bool enabled = true;
+};
+
 struct Analysis {
     std::filesystem::path source_path;
     std::uintmax_t source_size = 0;
@@ -34,15 +47,31 @@ struct Analysis {
     std::size_t window_count = 0;
     std::size_t max_delta_sample_index = 0;
     std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> mapped_bytes;
     std::vector<float> scalars;
+    std::vector<ValueMapper> mappers;
     float max_abs_scalar_delta = 0.0f;
     float x_scale = 1.0f;
     PhaseFit sine;
     PhaseFit cosine;
 };
 
+const char* mapper_kind_name(ValueMapperKind kind);
+double apply_value_mapper(double value, const ValueMapper& mapper);
+double apply_value_mappers(double value, std::span<const ValueMapper> mappers);
+std::uint8_t unsigned_mod_256(double value);
+std::uint8_t map_byte_to_wrapped(std::uint8_t byte,
+                                 std::span<const ValueMapper> mappers = {});
+float map_byte_to_scalar(std::uint8_t byte,
+                         std::span<const ValueMapper> mappers = {});
+std::vector<std::uint8_t> map_bytes_to_wrapped(
+    std::span<const std::uint8_t> bytes,
+    std::span<const ValueMapper> mappers = {});
+
 float byte_to_scalar(std::uint8_t byte);
-std::vector<float> map_bytes_to_scalars(std::span<const std::uint8_t> bytes);
+std::vector<float> map_bytes_to_scalars(
+    std::span<const std::uint8_t> bytes,
+    std::span<const ValueMapper> mappers = {});
 std::uint8_t adjacent_delta(std::uint8_t left, std::uint8_t right);
 std::vector<std::uint8_t> adjacent_deltas(std::span<const std::uint8_t> bytes);
 
@@ -67,6 +96,7 @@ Analysis analyze_file(const std::filesystem::path& path,
                       float max_slope = kDefaultMaxSlope,
                       double wave_tolerance = kDefaultWaveTolerance,
                       int phase_steps = 720,
-                      std::size_t max_phase_test_points = 65536);
+                      std::size_t max_phase_test_points = 65536,
+                      std::span<const ValueMapper> mappers = {});
 
 }  // namespace thrystr

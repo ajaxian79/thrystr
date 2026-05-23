@@ -4,6 +4,8 @@ Thrystr is a C++20 Skald/OpenGL/ImGui desktop tool for exploring byte streams as
 
 The first target view loads a binary file, finds the sliding 1 MiB window with the largest adjacent-byte delta, maps the bytes into the range `[-1, 1)`, scales X so consecutive slopes stay under a target threshold, and renders the sample with sine/cosine comparison waves.
 
+The plot supports a deterministic value-mapper stack before scalar conversion. Editable stages can add, subtract, multiply, or divide by constants. The fixed tail casts the mapped value into an unsigned modulo-256 byte, then maps that byte into `[-1, 1)`.
+
 ## Build
 
 ```bash
@@ -19,6 +21,8 @@ If `THRYSTR_SKALD_SOURCE_DIR` is omitted, CMake fetches Skald from GitHub.
 ```bash
 ./build/thrystr --file /path/to/binary
 ```
+
+In the GUI, use `Browse` to open a file dialog or press Enter in the path field after typing a path. Analysis sliders and mapper changes update the active plot immediately.
 
 For non-interactive rendering:
 

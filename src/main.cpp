@@ -18,11 +18,14 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
+constexpr float kInspectorWidth = 420.0f;
+constexpr const char* kOpenFileDialogId = "##open_file_dialog";
 
 struct Args {
     std::string file;
@@ -32,10 +35,18 @@ struct Args {
     int frames = 0;
 };
 
+struct FileBrowserEntry {
+    std::string name;
+    std::string size;
+    std::string modified;
+    bool is_folder = false;
+};
+
 struct AppState {
     char path[4096] = {};
     std::optional<thrystr::Analysis> analysis;
     std::string status = "No file loaded";
+    std::vector<thrystr::ValueMapper> mappers;
     bool show_points = true;
     bool show_lines = true;
     bool show_sine = true;
@@ -46,6 +57,10 @@ struct AppState {
     float wave_tolerance = static_cast<float>(thrystr::kDefaultWaveTolerance);
     int phase_steps = 720;
     int phase_test_points = 65536;
+    skald::FileDialogState file_dialog{};
+    std::vector<FileBrowserEntry> file_dialog_rows;
+    std::vector<skald::FileDialogEntry> file_dialog_entries;
+    int file_dialog_last_row = -1;
     skald::Fonts fonts{};
 };
 
@@ -105,6 +120,104 @@ std::string format_count(std::size_t count) {
     return buffer;
 }
 
+template <std::size_t N>
+void copy_to_buffer(char (&buffer)[N], const std::string& value) {
+    std::snprintf(buffer, N, "%s", value.c_str());
+}
+
+std::filesystem::path home_or_current_path() {
+    if (const char* home = std::getenv("HOME")) {
+        return home;
+    }
+    std::error_code error;
+    const std::filesystem::path cwd = std::filesystem::current_path(error);
+    return error ? std::filesystem::path("/") : cwd;
+}
+
+void initialize_file_dialog(AppState& state) {
+    copy_to_buffer(state.file_dialog.cwd, home_or_current_path().string());
+    state.file_dialog.filename[0] = '\0';
+    state.file_dialog.filter[0] = '\0';
+    state.file_dialog.row_sel = -1;
+}
+
+std::string entry_size_text(const std::filesystem::directory_entry& entry) {
+    std::error_code error;
+    if (entry.is_directory(error)) {
+        return {};
+    }
+    const auto size = entry.file_size(error);
+    return error ? std::string{} : format_bytes(size);
+}
+
+bool entry_matches_filter(const std::string& name, const char* filter) {
+    if (filter == nullptr || filter[0] == '\0') {
+        return true;
+    }
+    return name.find(filter) != std::string::npos;
+}
+
+void refresh_file_dialog_entries(AppState& state) {
+    state.file_dialog_rows.clear();
+    state.file_dialog_entries.clear();
+
+    std::filesystem::path cwd(state.file_dialog.cwd);
+    std::error_code error;
+    if (!std::filesystem::exists(cwd, error) || !std::filesystem::is_directory(cwd, error)) {
+        cwd = home_or_current_path();
+        copy_to_buffer(state.file_dialog.cwd, cwd.string());
+    }
+
+    if (cwd.has_parent_path()) {
+        state.file_dialog_rows.push_back(FileBrowserEntry{"..", "", "", true});
+    }
+
+    std::vector<FileBrowserEntry> rows;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(cwd, error)) {
+        if (error) {
+            break;
+        }
+
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || name[0] == '.') {
+            continue;
+        }
+        if (!entry_matches_filter(name, state.file_dialog.filter)) {
+            continue;
+        }
+
+        std::error_code type_error;
+        const bool is_folder = entry.is_directory(type_error);
+        rows.push_back(FileBrowserEntry{
+            name,
+            is_folder ? std::string{} : entry_size_text(entry),
+            "",
+            is_folder,
+        });
+    }
+
+    std::sort(rows.begin(), rows.end(), [](const FileBrowserEntry& left,
+                                           const FileBrowserEntry& right) {
+        if (left.is_folder != right.is_folder) {
+            return left.is_folder;
+        }
+        return left.name < right.name;
+    });
+
+    state.file_dialog_rows.insert(state.file_dialog_rows.end(),
+                                  rows.begin(), rows.end());
+    state.file_dialog_entries.reserve(state.file_dialog_rows.size());
+    for (const FileBrowserEntry& row : state.file_dialog_rows) {
+        state.file_dialog_entries.push_back(skald::FileDialogEntry{
+            row.name,
+            row.size,
+            row.modified,
+            row.is_folder,
+        });
+    }
+}
+
 bool save_screenshot(const std::string& path, int width, int height) {
     std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
                                       static_cast<std::size_t>(height) * 4u);
@@ -147,7 +260,8 @@ void load_path(AppState& state) {
             state.max_slope,
             static_cast<double>(state.wave_tolerance),
             state.phase_steps,
-            static_cast<std::size_t>(state.phase_test_points));
+            static_cast<std::size_t>(state.phase_test_points),
+            state.mappers);
 
         const auto& analysis = *state.analysis;
         state.status = "Loaded " + analysis.source_path.filename().string() +
@@ -156,6 +270,62 @@ void load_path(AppState& state) {
         state.analysis.reset();
         state.status = error.what();
     }
+}
+
+void refresh_analysis_params(AppState& state) {
+    if (!state.analysis) {
+        return;
+    }
+
+    try {
+        thrystr::Analysis& analysis = *state.analysis;
+        analysis.max_abs_scalar_delta = thrystr::max_abs_scalar_delta(analysis.scalars);
+        analysis.x_scale = thrystr::compute_x_scale(analysis.scalars, state.max_slope);
+        analysis.sine = thrystr::fit_wave_phase(
+            analysis.scalars,
+            false,
+            static_cast<double>(state.wave_tolerance),
+            state.phase_steps,
+            static_cast<std::size_t>(state.phase_test_points));
+        analysis.cosine = thrystr::fit_wave_phase(
+            analysis.scalars,
+            true,
+            static_cast<double>(state.wave_tolerance),
+            state.phase_steps,
+            static_cast<std::size_t>(state.phase_test_points));
+        state.status = "Updated analysis params";
+    } catch (const std::exception& error) {
+        state.status = error.what();
+    }
+}
+
+void reload_if_file_selected(AppState& state) {
+    if (state.path[0] != '\0') {
+        load_path(state);
+    }
+}
+
+void open_file_dialog(AppState& state) {
+    std::filesystem::path selected(state.path);
+    std::error_code error;
+    if (!selected.empty() && std::filesystem::is_regular_file(selected, error)) {
+        std::filesystem::path parent = selected.parent_path();
+        if (parent.empty()) {
+            parent = std::filesystem::current_path(error);
+            if (error) {
+                parent = home_or_current_path();
+            }
+        }
+        copy_to_buffer(state.file_dialog.cwd, parent.string());
+        copy_to_buffer(state.file_dialog.filename, selected.filename().string());
+    } else {
+        copy_to_buffer(state.file_dialog.cwd, home_or_current_path().string());
+        state.file_dialog.filename[0] = '\0';
+    }
+    state.file_dialog.row_sel = -1;
+    state.file_dialog_last_row = -1;
+    refresh_file_dialog_entries(state);
+    skald::OpenFileDialog(kOpenFileDialogId);
 }
 
 void draw_titlebar(AppState& state) {
@@ -189,12 +359,21 @@ void draw_titlebar(AppState& state) {
     }
 
     ImGui::SameLine(104.0f);
-    ImGui::SetNextItemWidth(std::max(260.0f, viewport.x - 430.0f));
-    ImGui::InputTextWithHint("##path", "/path/to/binary", state.path, sizeof(state.path));
+    ImGui::SetNextItemWidth(std::max(260.0f, viewport.x - 530.0f));
+    if (ImGui::InputTextWithHint("##path", "/path/to/binary",
+                                 state.path, sizeof(state.path),
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+        load_path(state);
+    }
 
     ImGui::SameLine();
     if (skald::AccentButton("Load", ImVec2(76.0f, 0.0f))) {
         load_path(state);
+    }
+
+    ImGui::SameLine();
+    if (skald::GhostButton("Browse", ImVec2(92.0f, 0.0f))) {
+        open_file_dialog(state);
     }
 
     ImGui::SameLine();
@@ -204,7 +383,7 @@ void draw_titlebar(AppState& state) {
     ImGui::End();
 }
 
-void slider_float_row(const char* label,
+bool slider_float_row(const char* label,
                       const char* id,
                       float* value,
                       float min_value,
@@ -212,23 +391,140 @@ void slider_float_row(const char* label,
                       const char* format) {
     ImGui::TextUnformatted(label);
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::SliderFloat(id, value, min_value, max_value, format);
+    return ImGui::SliderFloat(id, value, min_value, max_value, format);
 }
 
-void slider_int_row(const char* label,
+bool slider_int_row(const char* label,
                     const char* id,
                     int* value,
                     int min_value,
                     int max_value) {
     ImGui::TextUnformatted(label);
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::SliderInt(id, value, min_value, max_value);
+    return ImGui::SliderInt(id, value, min_value, max_value);
+}
+
+void draw_value_mapper_stack(AppState& state) {
+    skald::SectionHeader("Value Mappers");
+
+    bool mapper_changed = false;
+    int remove_index = -1;
+    int move_from = -1;
+    int move_to = -1;
+
+    if (ImGui::BeginTable("##mapper_table", 4,
+                          ImGuiTableFlags_BordersInnerH |
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 46.0f);
+        ImGui::TableSetupColumn("Op", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+        ImGui::TableHeadersRow();
+
+        static constexpr const char* kKinds[] = {"add", "sub", "mul", "div"};
+        for (std::size_t i = 0; i < state.mappers.size(); ++i) {
+            thrystr::ValueMapper& mapper = state.mappers[i];
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            mapper_changed |= ImGui::Checkbox("##enabled", &mapper.enabled);
+            ImGui::SameLine();
+            ImGui::Text("%zu", i + 1u);
+
+            ImGui::TableSetColumnIndex(1);
+            int kind = 0;
+            switch (mapper.kind) {
+            case thrystr::ValueMapperKind::Add:
+                kind = 0;
+                break;
+            case thrystr::ValueMapperKind::Subtract:
+                kind = 1;
+                break;
+            case thrystr::ValueMapperKind::Multiply:
+                kind = 2;
+                break;
+            case thrystr::ValueMapperKind::Divide:
+                kind = 3;
+                break;
+            }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo("##kind", &kind, kKinds, IM_ARRAYSIZE(kKinds))) {
+                mapper.kind = static_cast<thrystr::ValueMapperKind>(kind);
+                mapper_changed = true;
+            }
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            mapper_changed |= ImGui::DragScalar("##operand",
+                                                ImGuiDataType_Double,
+                                                &mapper.operand,
+                                                0.1f,
+                                                nullptr,
+                                                nullptr,
+                                                "%.6f");
+
+            ImGui::TableSetColumnIndex(3);
+            if (ImGui::SmallButton("^") && i > 0) {
+                move_from = static_cast<int>(i);
+                move_to = static_cast<int>(i - 1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("v") && i + 1 < state.mappers.size()) {
+                move_from = static_cast<int>(i);
+                move_to = static_cast<int>(i + 1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) {
+                remove_index = static_cast<int>(i);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (remove_index >= 0) {
+        state.mappers.erase(state.mappers.begin() + remove_index);
+        mapper_changed = true;
+    }
+    if (move_from >= 0 && move_to >= 0) {
+        std::swap(state.mappers[static_cast<std::size_t>(move_from)],
+                  state.mappers[static_cast<std::size_t>(move_to)]);
+        mapper_changed = true;
+    }
+
+    if (skald::GhostButton("+ add")) {
+        state.mappers.push_back({thrystr::ValueMapperKind::Add, 1.0, true});
+        mapper_changed = true;
+    }
+    ImGui::SameLine();
+    if (skald::GhostButton("- sub")) {
+        state.mappers.push_back({thrystr::ValueMapperKind::Subtract, 1.0, true});
+        mapper_changed = true;
+    }
+    ImGui::SameLine();
+    if (skald::GhostButton("* mul")) {
+        state.mappers.push_back({thrystr::ValueMapperKind::Multiply, 2.0, true});
+        mapper_changed = true;
+    }
+    ImGui::SameLine();
+    if (skald::GhostButton("/ div")) {
+        state.mappers.push_back({thrystr::ValueMapperKind::Divide, 2.0, true});
+        mapper_changed = true;
+    }
+
+    skald::KvRow("tail", "uint %% 256 -> [-1, 1)");
+
+    if (mapper_changed) {
+        reload_if_file_selected(state);
+    }
 }
 
 void draw_inspector(AppState& state) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(0.0f, 52.0f));
-    ImGui::SetNextWindowSize(ImVec2(336.0f, viewport.y - 52.0f));
+    ImGui::SetNextWindowSize(ImVec2(kInspectorWidth, viewport.y - 52.0f));
     ImGui::Begin("Inspector", nullptr,
                  ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize |
@@ -244,9 +540,29 @@ void draw_inspector(AppState& state) {
         skald::KvRow("max delta", "%u", static_cast<unsigned>(a.window.max_delta));
         skald::KvRow("x scale", "%.3f", static_cast<double>(a.x_scale));
         skald::KvRow("sample points", "%s", format_count(a.scalars.size()).c_str());
+        skald::KvRow("mappers", "%s", format_count(a.mappers.size()).c_str());
     } else {
         skald::KvRowStatus("state", "empty", skald::BadgeTone::Muted);
     }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    skald::SectionHeader("Load Params");
+    bool analysis_params_changed = false;
+    analysis_params_changed |= slider_float_row("max slope", "##maxslope",
+                                                &state.max_slope, 0.05f, 1.0f, "%.2f");
+    analysis_params_changed |= slider_float_row("wave tolerance", "##wavetolerance",
+                                                &state.wave_tolerance,
+                                                0.001f, 0.10f, "%.3f");
+    analysis_params_changed |= slider_int_row("phase steps", "##phasesteps",
+                                              &state.phase_steps, 90, 2880);
+    analysis_params_changed |= slider_int_row("phase samples", "##phasesamples",
+                                              &state.phase_test_points, 1024, 262144);
+    if (analysis_params_changed) {
+        refresh_analysis_params(state);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    draw_value_mapper_stack(state);
 
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
     skald::SectionHeader("Render");
@@ -256,15 +572,6 @@ void draw_inspector(AppState& state) {
     skald::PillToggle("cosine", &state.show_cosine);
     slider_float_row("x zoom", "##xzoom", &state.zoom_x, 0.10f, 8.0f, "%.2f");
     slider_float_row("y zoom", "##yzoom", &state.zoom_y, 0.25f, 4.0f, "%.2f");
-
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    skald::SectionHeader("Load Params");
-    slider_float_row("max slope", "##maxslope", &state.max_slope, 0.05f, 1.0f, "%.2f");
-    slider_float_row("wave tolerance", "##wavetolerance", &state.wave_tolerance,
-                     0.001f, 0.10f, "%.3f");
-    slider_int_row("phase steps", "##phasesteps", &state.phase_steps, 90, 2880);
-    slider_int_row("phase samples", "##phasesamples", &state.phase_test_points,
-                   1024, 262144);
 
     if (state.analysis) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -327,8 +634,8 @@ void draw_wave_overlay(const thrystr::Analysis& analysis,
 
 void draw_plot(AppState& state) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(336.0f, 52.0f));
-    ImGui::SetNextWindowSize(ImVec2(viewport.x - 336.0f, viewport.y - 52.0f));
+    ImGui::SetNextWindowPos(ImVec2(kInspectorWidth, 52.0f));
+    ImGui::SetNextWindowSize(ImVec2(viewport.x - kInspectorWidth, viewport.y - 52.0f));
     ImGui::Begin("Waveform", nullptr,
                  ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize |
@@ -462,10 +769,64 @@ void draw_plot(AppState& state) {
     ImGui::End();
 }
 
+void navigate_file_dialog_selection(AppState& state) {
+    const int row = state.file_dialog.row_sel;
+    if (row == state.file_dialog_last_row ||
+        row < 0 ||
+        row >= static_cast<int>(state.file_dialog_rows.size())) {
+        return;
+    }
+
+    state.file_dialog_last_row = row;
+    const FileBrowserEntry& entry = state.file_dialog_rows[static_cast<std::size_t>(row)];
+    if (!entry.is_folder) {
+        return;
+    }
+
+    std::filesystem::path cwd(state.file_dialog.cwd);
+    if (entry.name == "..") {
+        cwd = cwd.parent_path();
+    } else {
+        cwd /= entry.name;
+    }
+    copy_to_buffer(state.file_dialog.cwd, cwd.lexically_normal().string());
+    state.file_dialog.filename[0] = '\0';
+    state.file_dialog.row_sel = -1;
+    state.file_dialog_last_row = -1;
+    refresh_file_dialog_entries(state);
+}
+
+void draw_file_dialog(AppState& state) {
+    refresh_file_dialog_entries(state);
+    const skald::FileDialogResult result = skald::BeginFileDialog(
+        kOpenFileDialogId,
+        skald::FileDialogMode::Open,
+        state.file_dialog,
+        std::span<const skald::FileDialogEntry>(state.file_dialog_entries.data(),
+                                                state.file_dialog_entries.size()));
+
+    navigate_file_dialog_selection(state);
+
+    if (result != skald::FileDialogResult::Confirmed) {
+        return;
+    }
+
+    if (state.file_dialog.filename[0] == '\0') {
+        state.status = "Select a file";
+        return;
+    }
+
+    const std::filesystem::path selected =
+        std::filesystem::path(state.file_dialog.cwd) / state.file_dialog.filename;
+    copy_to_buffer(state.path, selected.lexically_normal().string());
+    load_path(state);
+}
+
 void draw_app(AppState& state) {
     draw_titlebar(state);
     draw_inspector(state);
     draw_plot(state);
+    draw_file_dialog(state);
 }
 
 }  // namespace
@@ -496,6 +857,7 @@ int main(int argc, char** argv) {
     skald::ApplyDefaults(skald::tokens::accents::cyan);
 
     AppState state;
+    initialize_file_dialog(state);
     state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR);
     if (!args.file.empty()) {
         std::snprintf(state.path, sizeof(state.path), "%s", args.file.c_str());

@@ -4,7 +4,6 @@
 #include <cmath>
 #include <deque>
 #include <fstream>
-#include <limits>
 #include <stdexcept>
 
 namespace thrystr {
@@ -18,15 +17,96 @@ std::uint8_t delta_at(std::span<const std::uint8_t> bytes, std::size_t index) {
 
 }  // namespace
 
+const char* mapper_kind_name(ValueMapperKind kind) {
+    switch (kind) {
+    case ValueMapperKind::Add:
+        return "add";
+    case ValueMapperKind::Subtract:
+        return "subtract";
+    case ValueMapperKind::Multiply:
+        return "multiply";
+    case ValueMapperKind::Divide:
+        return "divide";
+    }
+    return "unknown";
+}
+
+double apply_value_mapper(double value, const ValueMapper& mapper) {
+    if (!mapper.enabled) {
+        return value;
+    }
+
+    switch (mapper.kind) {
+    case ValueMapperKind::Add:
+        return value + mapper.operand;
+    case ValueMapperKind::Subtract:
+        return value - mapper.operand;
+    case ValueMapperKind::Multiply:
+        return value * mapper.operand;
+    case ValueMapperKind::Divide:
+        if (std::abs(mapper.operand) <= 1.0e-12) {
+            throw std::invalid_argument("divide mapper operand must not be zero");
+        }
+        return value / mapper.operand;
+    }
+    return value;
+}
+
+double apply_value_mappers(double value, std::span<const ValueMapper> mappers) {
+    for (const ValueMapper& mapper : mappers) {
+        value = apply_value_mapper(value, mapper);
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("mapper stack produced a non-finite value");
+        }
+    }
+    return value;
+}
+
+std::uint8_t unsigned_mod_256(double value) {
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument("cannot wrap non-finite value");
+    }
+
+    const double truncated = std::trunc(value);
+    double wrapped = std::fmod(truncated, 256.0);
+    if (wrapped < 0.0) {
+        wrapped += 256.0;
+    }
+    return static_cast<std::uint8_t>(wrapped);
+}
+
+std::uint8_t map_byte_to_wrapped(std::uint8_t byte,
+                                 std::span<const ValueMapper> mappers) {
+    const double mapped = apply_value_mappers(static_cast<double>(byte), mappers);
+    return unsigned_mod_256(mapped);
+}
+
+float map_byte_to_scalar(std::uint8_t byte,
+                         std::span<const ValueMapper> mappers) {
+    return byte_to_scalar(map_byte_to_wrapped(byte, mappers));
+}
+
+std::vector<std::uint8_t> map_bytes_to_wrapped(
+    std::span<const std::uint8_t> bytes,
+    std::span<const ValueMapper> mappers) {
+    std::vector<std::uint8_t> mapped;
+    mapped.reserve(bytes.size());
+    for (const std::uint8_t byte : bytes) {
+        mapped.push_back(map_byte_to_wrapped(byte, mappers));
+    }
+    return mapped;
+}
+
 float byte_to_scalar(std::uint8_t byte) {
     return static_cast<float>(byte) / 128.0f - 1.0f;
 }
 
-std::vector<float> map_bytes_to_scalars(std::span<const std::uint8_t> bytes) {
+std::vector<float> map_bytes_to_scalars(std::span<const std::uint8_t> bytes,
+                                        std::span<const ValueMapper> mappers) {
     std::vector<float> scalars;
     scalars.reserve(bytes.size());
     for (const std::uint8_t byte : bytes) {
-        scalars.push_back(byte_to_scalar(byte));
+        scalars.push_back(map_byte_to_scalar(byte, mappers));
     }
     return scalars;
 }
@@ -181,21 +261,30 @@ Analysis analyze_file(const std::filesystem::path& path,
                       float max_slope,
                       double wave_tolerance,
                       int phase_steps,
-                      std::size_t max_phase_test_points) {
+                      std::size_t max_phase_test_points,
+                      std::span<const ValueMapper> mappers) {
     std::vector<std::uint8_t> source = read_file_bytes(path);
+    std::vector<std::uint8_t> mapped_source = map_bytes_to_wrapped(source, mappers);
 
     Analysis analysis;
     analysis.source_path = path;
     analysis.source_size = source.size();
-    analysis.window = find_highest_entropy_window(source, window_bytes);
-    analysis.window_count = source.empty()
+    analysis.mappers.assign(mappers.begin(), mappers.end());
+    analysis.window = find_highest_entropy_window(mapped_source, window_bytes);
+    analysis.window_count = mapped_source.empty()
         ? 0
-        : source.size() - analysis.window.length + 1;
+        : mapped_source.size() - analysis.window.length + 1;
 
     const auto begin = source.begin() + static_cast<std::ptrdiff_t>(analysis.window.offset);
     const auto end = begin + static_cast<std::ptrdiff_t>(analysis.window.length);
     analysis.bytes.assign(begin, end);
-    analysis.scalars = map_bytes_to_scalars(analysis.bytes);
+
+    const auto mapped_begin = mapped_source.begin() +
+        static_cast<std::ptrdiff_t>(analysis.window.offset);
+    const auto mapped_end = mapped_begin +
+        static_cast<std::ptrdiff_t>(analysis.window.length);
+    analysis.mapped_bytes.assign(mapped_begin, mapped_end);
+    analysis.scalars = map_bytes_to_scalars(analysis.mapped_bytes);
     analysis.max_abs_scalar_delta = max_abs_scalar_delta(analysis.scalars);
     analysis.x_scale = compute_x_scale(analysis.scalars, max_slope);
     analysis.sine = fit_wave_phase(analysis.scalars, false, wave_tolerance,
