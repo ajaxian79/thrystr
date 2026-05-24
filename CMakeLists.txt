@@ -43,7 +43,8 @@ target_compile_options(thrystr_core PRIVATE
 add_library(thrystr_app STATIC
     src/app/workspace.cpp
     src/app/fit_validation.cpp
-    src/app/convergent_fit.cpp)
+    src/app/convergent_fit.cpp
+    src/app/multi_track_fit.cpp)
 target_include_directories(thrystr_app PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
@@ -134,6 +135,11 @@ if(THRYSTR_BUILD_TESTS)
         tests/app_model_tests.cpp)
     target_link_libraries(thrystr_app_tests PRIVATE thrystr_app)
     add_test(NAME thrystr_app_tests COMMAND thrystr_app_tests)
+
+    add_executable(thrystr_multi_track_fit_tests
+        tests/app_multi_track_fit_tests.cpp)
+    target_link_libraries(thrystr_multi_track_fit_tests PRIVATE thrystr_app)
+    add_test(NAME thrystr_multi_track_fit_tests COMMAND thrystr_multi_track_fit_tests)
 endif()
 
 if(THRYSTR_BUILD_FUZZ)
