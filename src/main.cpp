@@ -307,10 +307,12 @@ GLFWwindow* create_undecorated_window(int width,
                                       const char* title,
                                       int min_width,
                                       int min_height,
+                                      bool resizable,
                                       bool visible) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, resizable ? GLFW_TRUE : GLFW_FALSE);
     glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
 
     GLFWwindow* window = glfwCreateWindow(width, height, title, nullptr, nullptr);
@@ -320,10 +322,10 @@ GLFWwindow* create_undecorated_window(int width,
 
     force_undecorated_window(window);
     glfwSetWindowSizeLimits(window,
-                            min_width,
-                            min_height,
-                            GLFW_DONT_CARE,
-                            GLFW_DONT_CARE);
+                            resizable ? min_width : width,
+                            resizable ? min_height : height,
+                            resizable ? GLFW_DONT_CARE : width,
+                            resizable ? GLFW_DONT_CARE : height);
     center_window_on_primary_monitor(window);
     return window;
 }
@@ -568,7 +570,8 @@ void update_chrome_action(AppState& state,
 
 void handle_custom_chrome(AppState& state,
                           GLFWwindow* window,
-                          const ChromeCursors& cursors) {
+                          const ChromeCursors& cursors,
+                          bool allow_resize = true) {
     if (!window || glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
         return;
     }
@@ -597,8 +600,9 @@ void handle_custom_chrome(AppState& state,
         return;
     }
 
-    const ChromeAction resize_action =
-        resize_action_at(cursor_x, cursor_y, window_w, window_h);
+    const ChromeAction resize_action = allow_resize
+        ? resize_action_at(cursor_x, cursor_y, window_w, window_h)
+        : ChromeAction::None;
     const bool resize_hovered = chrome_action_is_resize(resize_action);
     const bool titlebar_hovered =
         cursor_y >= 0.0 && cursor_y <= static_cast<double>(kTopChromeHeight);
@@ -2112,20 +2116,7 @@ void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
     ImGui::SameLine(72.0f);
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "/ start");
 
-    const float controls_width = 96.0f;
-    ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 8.0f));
-    if (window_control_button(WindowControl::Minimize, "Minimize", window)) {
-        glfwIconifyWindow(window);
-    }
-    ImGui::SameLine();
-    if (window_control_button(WindowControl::Maximize, "Maximize", window)) {
-        if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
-            glfwRestoreWindow(window);
-        } else {
-            glfwMaximizeWindow(window);
-        }
-    }
-    ImGui::SameLine();
+    ImGui::SetCursorPos(ImVec2(viewport.x - 40.0f, 8.0f));
     if (window_control_button(WindowControl::Close, "Close", window)) {
         state.request_close = true;
     }
@@ -2138,7 +2129,7 @@ StartupAction draw_splash_window(AppState& state,
                                  const ChromeCursors& cursors) {
     StartupAction choice = draw_splash(state);
     draw_splash_titlebar(state, window);
-    handle_custom_chrome(state, window, cursors);
+    handle_custom_chrome(state, window, cursors, false);
     return choice;
 }
 
@@ -2959,6 +2950,7 @@ int main(int argc, char** argv) {
                                                               "thrystr start",
                                                               kSplashMinWindowWidth,
                                                               kSplashMinWindowHeight,
+                                                              false,
                                                               false);
         if (!splash_window) {
             destroy_chrome_cursors(chrome_cursors);
@@ -3042,6 +3034,7 @@ int main(int argc, char** argv) {
                                                   "thrystr",
                                                   kMinWindowWidth,
                                                   kMinWindowHeight,
+                                                  true,
                                                   false);
     if (!window) {
         destroy_chrome_cursors(chrome_cursors);
