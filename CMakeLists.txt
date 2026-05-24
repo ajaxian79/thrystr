@@ -8,6 +8,7 @@ project(thrystr
 option(THRYSTR_BUILD_APP "Build the OpenGL/ImGui application" ON)
 option(THRYSTR_BUILD_TESTS "Build unit tests" ON)
 option(THRYSTR_BUILD_FUZZ "Build libFuzzer targets" OFF)
+option(THRYSTR_BUILD_DOCS "Build the in-house documentation outputs" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,6 +123,34 @@ if(THRYSTR_BUILD_APP)
     target_compile_options(thrystr PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+endif()
+
+if(THRYSTR_BUILD_DOCS)
+    add_executable(thrystr_docgen
+        tools/docgen/main.cpp)
+    target_compile_features(thrystr_docgen PRIVATE cxx_std_20)
+    target_compile_options(thrystr_docgen PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+
+    set(THRYSTR_GENERATED_DOCS_DIR "${CMAKE_BINARY_DIR}/generated/docs")
+    set(THRYSTR_DOCS_SITE_DIR "${CMAKE_BINARY_DIR}/docs/site")
+    set(THRYSTR_DOCS_CPP "${THRYSTR_GENERATED_DOCS_DIR}/docs_resources.cpp")
+    set(THRYSTR_DOCS_HPP "${THRYSTR_GENERATED_DOCS_DIR}/docs_resources.hpp")
+    file(GLOB THRYSTR_USER_DOCS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/user/*.md")
+    add_custom_command(
+        OUTPUT "${THRYSTR_DOCS_CPP}" "${THRYSTR_DOCS_HPP}"
+        COMMAND thrystr_docgen
+            --input "${CMAKE_CURRENT_SOURCE_DIR}/docs/user"
+            --site "${THRYSTR_DOCS_SITE_DIR}"
+            --cpp "${THRYSTR_DOCS_CPP}"
+            --hpp "${THRYSTR_DOCS_HPP}"
+        DEPENDS thrystr_docgen ${THRYSTR_USER_DOCS}
+        COMMENT "Generating thrystr manual resources"
+        VERBATIM)
+    add_custom_target(thrystr_docs ALL
+        DEPENDS "${THRYSTR_DOCS_CPP}" "${THRYSTR_DOCS_HPP}")
 endif()
 
 if(THRYSTR_BUILD_TESTS)
