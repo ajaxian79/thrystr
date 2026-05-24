@@ -83,6 +83,14 @@ constexpr std::uint64_t kManualScrollAutoscrollInhibitFrames = 90u;
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
 constexpr int kWaveFitPhaseSteps = 128;
+constexpr std::size_t kFunctionFitMaxPoints = 512;
+constexpr int kFunctionFitSpatialPeriodSteps = 5;
+constexpr int kFunctionFitWavelengthSteps = 10;
+constexpr int kFunctionFitPhaseSteps = 12;
+constexpr int kFunctionFitRotationSteps = 9;
+constexpr int kFunctionFitTopSingleCount = 5;
+constexpr double kFunctionValueClamp = 8.0;
+constexpr int kRandomSampleDefaultCount = 128;
 constexpr std::size_t kMaxWaveWavelengthModifiers = 16;
 constexpr int kWaveModifierWavelengthSteps = 41;
 constexpr std::uintmax_t kLargeSourcePhaseFitDeferBytes = 128ull * 1024ull * 1024ull;
@@ -90,7 +98,7 @@ constexpr const char* kSplashHeroPath = THRYSTR_ASSET_DIR "/splash_hero.png";
 constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
-constexpr std::uint32_t kWaveSettingsVersion = 6;
+constexpr std::uint32_t kWaveSettingsVersion = 7;
 constexpr std::uint32_t kWaveSettingsEndianStamp = 0x01020304u;
 constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
 constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
@@ -144,16 +152,80 @@ enum class EntityType {
     Wave,
 };
 
+enum class WaveFunctionKind : std::uint32_t {
+    Sine,
+    Cosine,
+    Tangent,
+    Cosecant,
+    Secant,
+    Cotangent,
+    ArcSine,
+    ArcCosine,
+    ArcTangent,
+    ArcCosecant,
+    ArcSecant,
+    ArcCotangent,
+    HyperbolicSine,
+    HyperbolicCosine,
+    HyperbolicTangent,
+    HyperbolicCosecant,
+    HyperbolicSecant,
+    HyperbolicCotangent,
+    InverseHyperbolicSine,
+    InverseHyperbolicCosine,
+    InverseHyperbolicTangent,
+    InverseHyperbolicCosecant,
+    InverseHyperbolicSecant,
+    InverseHyperbolicCotangent,
+    NaturalExponential,
+    GeneralExponential,
+    NaturalLog,
+    CommonLog,
+    BinaryLog,
+    Square,
+    Cube,
+    SquareRoot,
+    CubeRoot,
+    Reciprocal,
+    AbsoluteValue,
+    Sign,
+    Floor,
+    Ceiling,
+    Round,
+    FractionalPart,
+    Heaviside,
+    Gamma,
+    ErrorFunction,
+    RiemannZeta,
+    BesselJ0,
+    Count,
+};
+
+enum class PropertyTab {
+    Entities,
+    Data,
+    Wave,
+    Fit,
+    Points,
+    Mappers,
+    View,
+};
+
 struct DataEntity {
     double spatial_period_nm = 1.0;
     std::uint8_t sample_bits = 8;
 };
 
 struct WaveEntity {
+    WaveFunctionKind function = WaveFunctionKind::Sine;
+    bool use_secondary_function = false;
+    WaveFunctionKind secondary_function = WaveFunctionKind::Cosine;
     double wavelength_nm = 64.0;
     double amplitude = 2.0;
+    double secondary_amplitude = 0.0;
     double amplitude_offset = -1.0;
     double phase_nm = 0.0;
+    double rotation_degrees = 0.0;
     std::vector<std::pair<double, double>> wavelength_modifiers;
 };
 
@@ -178,6 +250,29 @@ struct WaveFitResult {
     std::size_t hits = 0;
     std::size_t tested = 0;
     double mean_error = 0.0;
+};
+
+struct SelectedPointSample {
+    std::size_t index = 0;
+    double value = 0.0;
+};
+
+struct FunctionFitResult {
+    bool valid = false;
+    WaveFunctionKind function = WaveFunctionKind::Sine;
+    bool use_secondary_function = false;
+    WaveFunctionKind secondary_function = WaveFunctionKind::Cosine;
+    double data_spatial_period_nm = 1.0;
+    double wavelength_nm = 64.0;
+    double phase_nm = 0.0;
+    double rotation_degrees = 0.0;
+    double amplitude = 2.0;
+    double secondary_amplitude = 0.0;
+    double amplitude_offset = -1.0;
+    double mean_error = DBL_MAX;
+    double max_error = DBL_MAX;
+    std::size_t hits = 0;
+    std::size_t tested = 0;
 };
 
 struct LazyBlock {
@@ -361,6 +456,8 @@ struct AppState {
     bool show_lines = true;
     bool wheel_scroll_mode = true;
     bool segment_selection_mode = false;
+    bool point_selection_mode = false;
+    PropertyTab property_tab = PropertyTab::Entities;
     float zoom_x = 1.0f;
     float zoom_y = 1.0f;
     float timeline_scroll_x = 0.0f;
@@ -383,6 +480,10 @@ struct AppState {
     char custom_playback_speed_text[32] = "60";
     bool xline_playing = false;
     bool playhead_dragging = false;
+    std::vector<std::size_t> selected_data_points;
+    int random_sample_count = kRandomSampleDefaultCount;
+    std::uint64_t random_sample_seed = 0x544852595354ull;
+    bool fit_function_combinations = true;
     int docs_page = 0;
     char docs_search[128] = {};
     std::optional<std::size_t> pending_scroll_index;
@@ -1529,6 +1630,305 @@ std::size_t nice_tick(double raw) {
 
 const char* entity_type_name(EntityType type) { return type == EntityType::Data ? "data" : "wave"; }
 
+constexpr std::array<WaveFunctionKind, static_cast<std::size_t>(WaveFunctionKind::Count)>
+    kWaveFunctionKinds = {
+        WaveFunctionKind::Sine,
+        WaveFunctionKind::Cosine,
+        WaveFunctionKind::Tangent,
+        WaveFunctionKind::Cosecant,
+        WaveFunctionKind::Secant,
+        WaveFunctionKind::Cotangent,
+        WaveFunctionKind::ArcSine,
+        WaveFunctionKind::ArcCosine,
+        WaveFunctionKind::ArcTangent,
+        WaveFunctionKind::ArcCosecant,
+        WaveFunctionKind::ArcSecant,
+        WaveFunctionKind::ArcCotangent,
+        WaveFunctionKind::HyperbolicSine,
+        WaveFunctionKind::HyperbolicCosine,
+        WaveFunctionKind::HyperbolicTangent,
+        WaveFunctionKind::HyperbolicCosecant,
+        WaveFunctionKind::HyperbolicSecant,
+        WaveFunctionKind::HyperbolicCotangent,
+        WaveFunctionKind::InverseHyperbolicSine,
+        WaveFunctionKind::InverseHyperbolicCosine,
+        WaveFunctionKind::InverseHyperbolicTangent,
+        WaveFunctionKind::InverseHyperbolicCosecant,
+        WaveFunctionKind::InverseHyperbolicSecant,
+        WaveFunctionKind::InverseHyperbolicCotangent,
+        WaveFunctionKind::NaturalExponential,
+        WaveFunctionKind::GeneralExponential,
+        WaveFunctionKind::NaturalLog,
+        WaveFunctionKind::CommonLog,
+        WaveFunctionKind::BinaryLog,
+        WaveFunctionKind::Square,
+        WaveFunctionKind::Cube,
+        WaveFunctionKind::SquareRoot,
+        WaveFunctionKind::CubeRoot,
+        WaveFunctionKind::Reciprocal,
+        WaveFunctionKind::AbsoluteValue,
+        WaveFunctionKind::Sign,
+        WaveFunctionKind::Floor,
+        WaveFunctionKind::Ceiling,
+        WaveFunctionKind::Round,
+        WaveFunctionKind::FractionalPart,
+        WaveFunctionKind::Heaviside,
+        WaveFunctionKind::Gamma,
+        WaveFunctionKind::ErrorFunction,
+        WaveFunctionKind::RiemannZeta,
+        WaveFunctionKind::BesselJ0,
+};
+
+WaveFunctionKind normalize_wave_function_kind(std::uint32_t raw) {
+    if (raw >= static_cast<std::uint32_t>(WaveFunctionKind::Count)) {
+        return WaveFunctionKind::Sine;
+    }
+    return static_cast<WaveFunctionKind>(raw);
+}
+
+const char* wave_function_name(WaveFunctionKind kind) {
+    switch (kind) {
+    case WaveFunctionKind::Sine:
+        return "sine";
+    case WaveFunctionKind::Cosine:
+        return "cosine";
+    case WaveFunctionKind::Tangent:
+        return "tangent";
+    case WaveFunctionKind::Cosecant:
+        return "cosecant";
+    case WaveFunctionKind::Secant:
+        return "secant";
+    case WaveFunctionKind::Cotangent:
+        return "cotangent";
+    case WaveFunctionKind::ArcSine:
+        return "arcsine";
+    case WaveFunctionKind::ArcCosine:
+        return "arccosine";
+    case WaveFunctionKind::ArcTangent:
+        return "arctangent";
+    case WaveFunctionKind::ArcCosecant:
+        return "arccosecant";
+    case WaveFunctionKind::ArcSecant:
+        return "arcsecant";
+    case WaveFunctionKind::ArcCotangent:
+        return "arccotangent";
+    case WaveFunctionKind::HyperbolicSine:
+        return "hyperbolic sine";
+    case WaveFunctionKind::HyperbolicCosine:
+        return "hyperbolic cosine";
+    case WaveFunctionKind::HyperbolicTangent:
+        return "hyperbolic tangent";
+    case WaveFunctionKind::HyperbolicCosecant:
+        return "hyperbolic cosecant";
+    case WaveFunctionKind::HyperbolicSecant:
+        return "hyperbolic secant";
+    case WaveFunctionKind::HyperbolicCotangent:
+        return "hyperbolic cotangent";
+    case WaveFunctionKind::InverseHyperbolicSine:
+        return "inverse hyperbolic sine";
+    case WaveFunctionKind::InverseHyperbolicCosine:
+        return "inverse hyperbolic cosine";
+    case WaveFunctionKind::InverseHyperbolicTangent:
+        return "inverse hyperbolic tangent";
+    case WaveFunctionKind::InverseHyperbolicCosecant:
+        return "inverse hyperbolic cosecant";
+    case WaveFunctionKind::InverseHyperbolicSecant:
+        return "inverse hyperbolic secant";
+    case WaveFunctionKind::InverseHyperbolicCotangent:
+        return "inverse hyperbolic cotangent";
+    case WaveFunctionKind::NaturalExponential:
+        return "natural exponential";
+    case WaveFunctionKind::GeneralExponential:
+        return "general exponential";
+    case WaveFunctionKind::NaturalLog:
+        return "natural log";
+    case WaveFunctionKind::CommonLog:
+        return "common log";
+    case WaveFunctionKind::BinaryLog:
+        return "binary log";
+    case WaveFunctionKind::Square:
+        return "square";
+    case WaveFunctionKind::Cube:
+        return "cube";
+    case WaveFunctionKind::SquareRoot:
+        return "square root";
+    case WaveFunctionKind::CubeRoot:
+        return "cube root";
+    case WaveFunctionKind::Reciprocal:
+        return "reciprocal";
+    case WaveFunctionKind::AbsoluteValue:
+        return "absolute value";
+    case WaveFunctionKind::Sign:
+        return "sign";
+    case WaveFunctionKind::Floor:
+        return "floor";
+    case WaveFunctionKind::Ceiling:
+        return "ceiling";
+    case WaveFunctionKind::Round:
+        return "round";
+    case WaveFunctionKind::FractionalPart:
+        return "fractional part";
+    case WaveFunctionKind::Heaviside:
+        return "heaviside";
+    case WaveFunctionKind::Gamma:
+        return "gamma";
+    case WaveFunctionKind::ErrorFunction:
+        return "error function";
+    case WaveFunctionKind::RiemannZeta:
+        return "riemann zeta";
+    case WaveFunctionKind::BesselJ0:
+        return "bessel j0";
+    case WaveFunctionKind::Count:
+        break;
+    }
+    return "sine";
+}
+
+double clamp_finite_function_value(double value, double limit = kFunctionValueClamp) {
+    if (!std::isfinite(value)) {
+        return value < 0.0 ? -limit : limit;
+    }
+    return std::clamp(value, -limit, limit);
+}
+
+double nonzero_for_division(double value) {
+    if (std::abs(value) < 1.0e-9) {
+        return value < 0.0 ? -1.0e-9 : 1.0e-9;
+    }
+    return value;
+}
+
+double approximate_riemann_zeta(double s) {
+    s = std::clamp(s, 1.05, 12.0);
+    double sum = 0.0;
+    for (int n = 1; n <= 96; ++n) {
+        sum += std::pow(static_cast<double>(n), -s);
+    }
+    return sum;
+}
+
+double standard_function_raw(WaveFunctionKind kind, double unit_x) {
+    const double theta = 2.0 * std::numbers::pi * unit_x;
+    const double bounded = std::clamp(std::sin(theta), -0.999999, 0.999999);
+    const double limited_unit = std::clamp(unit_x, -6.0, 6.0);
+    const double hyperbolic_unit = std::clamp(unit_x, -3.0, 3.0);
+    const double positive = std::abs(unit_x) + 1.0e-6;
+    const double positive_one = std::abs(unit_x) + 1.0;
+    const double inverse_domain = std::copysign(1.0 + std::abs(std::sin(theta)),
+                                                std::sin(theta) == 0.0 ? 1.0 : std::sin(theta));
+
+    switch (kind) {
+    case WaveFunctionKind::Sine:
+        return std::sin(theta);
+    case WaveFunctionKind::Cosine:
+        return std::cos(theta);
+    case WaveFunctionKind::Tangent:
+        return std::tan(theta);
+    case WaveFunctionKind::Cosecant:
+        return 1.0 / nonzero_for_division(std::sin(theta));
+    case WaveFunctionKind::Secant:
+        return 1.0 / nonzero_for_division(std::cos(theta));
+    case WaveFunctionKind::Cotangent:
+        return 1.0 / nonzero_for_division(std::tan(theta));
+    case WaveFunctionKind::ArcSine:
+        return std::asin(bounded);
+    case WaveFunctionKind::ArcCosine:
+        return std::acos(bounded);
+    case WaveFunctionKind::ArcTangent:
+        return std::atan(unit_x);
+    case WaveFunctionKind::ArcCosecant:
+        return std::asin(1.0 / inverse_domain);
+    case WaveFunctionKind::ArcSecant:
+        return std::acos(1.0 / inverse_domain);
+    case WaveFunctionKind::ArcCotangent:
+        return std::atan(1.0 / nonzero_for_division(unit_x));
+    case WaveFunctionKind::HyperbolicSine:
+        return std::sinh(hyperbolic_unit);
+    case WaveFunctionKind::HyperbolicCosine:
+        return std::cosh(hyperbolic_unit);
+    case WaveFunctionKind::HyperbolicTangent:
+        return std::tanh(hyperbolic_unit);
+    case WaveFunctionKind::HyperbolicCosecant:
+        return 1.0 / nonzero_for_division(std::sinh(hyperbolic_unit));
+    case WaveFunctionKind::HyperbolicSecant:
+        return 1.0 / nonzero_for_division(std::cosh(hyperbolic_unit));
+    case WaveFunctionKind::HyperbolicCotangent:
+        return 1.0 / nonzero_for_division(std::tanh(hyperbolic_unit));
+    case WaveFunctionKind::InverseHyperbolicSine:
+        return std::asinh(unit_x);
+    case WaveFunctionKind::InverseHyperbolicCosine:
+        return std::acosh(positive_one);
+    case WaveFunctionKind::InverseHyperbolicTangent:
+        return std::atanh(bounded);
+    case WaveFunctionKind::InverseHyperbolicCosecant:
+        return std::asinh(1.0 / nonzero_for_division(unit_x));
+    case WaveFunctionKind::InverseHyperbolicSecant: {
+        const double domain = std::clamp(0.05 + 0.95 * std::abs(std::sin(theta)), 0.000001, 1.0);
+        return std::acosh(1.0 / domain);
+    }
+    case WaveFunctionKind::InverseHyperbolicCotangent: {
+        const double domain = std::copysign(1.0 + std::abs(unit_x), unit_x == 0.0 ? 1.0 : unit_x);
+        return std::atanh(1.0 / domain);
+    }
+    case WaveFunctionKind::NaturalExponential:
+        return std::exp(limited_unit);
+    case WaveFunctionKind::GeneralExponential:
+        return std::pow(2.0, std::clamp(unit_x, -8.0, 8.0));
+    case WaveFunctionKind::NaturalLog:
+        return std::log(positive);
+    case WaveFunctionKind::CommonLog:
+        return std::log10(positive);
+    case WaveFunctionKind::BinaryLog:
+        return std::log2(positive);
+    case WaveFunctionKind::Square:
+        return unit_x * unit_x;
+    case WaveFunctionKind::Cube:
+        return unit_x * unit_x * unit_x;
+    case WaveFunctionKind::SquareRoot:
+        return std::sqrt(positive);
+    case WaveFunctionKind::CubeRoot:
+        return std::cbrt(unit_x);
+    case WaveFunctionKind::Reciprocal:
+        return 1.0 / nonzero_for_division(unit_x);
+    case WaveFunctionKind::AbsoluteValue:
+        return std::abs(unit_x);
+    case WaveFunctionKind::Sign:
+        return unit_x > 0.0 ? 1.0 : (unit_x < 0.0 ? -1.0 : 0.0);
+    case WaveFunctionKind::Floor:
+        return std::floor(unit_x);
+    case WaveFunctionKind::Ceiling:
+        return std::ceil(unit_x);
+    case WaveFunctionKind::Round:
+        return std::round(unit_x);
+    case WaveFunctionKind::FractionalPart:
+        return unit_x - std::floor(unit_x);
+    case WaveFunctionKind::Heaviside:
+        return unit_x >= 0.0 ? 1.0 : 0.0;
+    case WaveFunctionKind::Gamma:
+        return std::tgamma(std::clamp(positive, 0.1, 6.0));
+    case WaveFunctionKind::ErrorFunction:
+        return std::erf(unit_x);
+    case WaveFunctionKind::RiemannZeta:
+        return approximate_riemann_zeta(std::abs(unit_x) + 1.05);
+    case WaveFunctionKind::BesselJ0:
+        return std::cyl_bessel_j(0.0, theta);
+    case WaveFunctionKind::Count:
+        break;
+    }
+    return std::sin(theta);
+}
+
+double rotated_function_raw(WaveFunctionKind kind, double unit_x, double rotation_degrees) {
+    const double raw_y = clamp_finite_function_value(standard_function_raw(kind, unit_x));
+    if (std::abs(rotation_degrees) <= 1.0e-9) {
+        return raw_y;
+    }
+
+    const double radians = rotation_degrees * std::numbers::pi / 180.0;
+    const double rotated_y = unit_x * std::sin(radians) + raw_y * std::cos(radians);
+    return clamp_finite_function_value(rotated_y);
+}
+
 Entity* find_entity(AppState& state, int id) {
     for (Entity& entity : state.entities) {
         if (entity.id == id) {
@@ -1668,12 +2068,15 @@ void open_empty_workspace(AppState& state) {
     state.entity_name_id = 0;
     state.wheel_scroll_mode = true;
     state.segment_selection_mode = false;
+    state.point_selection_mode = false;
+    state.property_tab = PropertyTab::Entities;
     state.timeline_scroll_x = 0.0f;
     state.xline_playing = false;
     state.playhead_dragging = false;
     state.playhead_index = 0;
     state.playhead_fraction = 0.0;
     state.pending_scroll_index.reset();
+    state.selected_data_points.clear();
     state.status = "Empty workspace";
 }
 
@@ -1738,10 +2141,24 @@ double wave_wavelength_at_nm(const WaveEntity& wave, double x_nm) {
     return wavelength;
 }
 
-double wave_value_at_nm(const WaveEntity& wave, double x_nm) {
+double wave_function_basis_at_nm(const WaveEntity& wave, WaveFunctionKind function, double x_nm) {
     const double wavelength = wave_wavelength_at_nm(wave, x_nm);
-    const double theta = 2.0 * std::numbers::pi * (x_nm - wave.phase_nm) / wavelength;
-    return wave.amplitude_offset + wave.amplitude * ((std::sin(theta) + 1.0) * 0.5);
+    const double unit_x = (x_nm - wave.phase_nm) / wavelength;
+    const double raw_y = rotated_function_raw(function, unit_x, wave.rotation_degrees);
+    return (raw_y + 1.0) * 0.5;
+}
+
+double wave_value_at_nm(const WaveEntity& wave, double x_nm) {
+    double value = wave.amplitude_offset +
+                   wave.amplitude * wave_function_basis_at_nm(wave, wave.function, x_nm);
+    if (wave.use_secondary_function) {
+        value += wave.secondary_amplitude *
+                 wave_function_basis_at_nm(wave, wave.secondary_function, x_nm);
+    }
+    if (!std::isfinite(value)) {
+        return value < 0.0 ? -1.0e6 : 1.0e6;
+    }
+    return std::clamp(value, -1.0e6, 1.0e6);
 }
 
 WaveFitResult score_wave_on_range(const AppState& state, const WaveEntity& wave, std::size_t first,
@@ -1893,6 +2310,399 @@ void create_interpolated_wave(AppState& state) {
     state.status = "Created interpolated wave: " + format_count(final_fit.hits) + "/" +
                    format_count(final_fit.tested) + " point hits, " +
                    format_count(wave.wave.wavelength_modifiers.size()) + " wavelength keys";
+}
+
+void normalize_selected_data_points(AppState& state) {
+    const std::size_t count = source_sample_count(state);
+    if (count == 0u) {
+        state.selected_data_points.clear();
+        return;
+    }
+    for (std::size_t& index : state.selected_data_points) {
+        index = std::min(index, count - 1u);
+    }
+    std::sort(state.selected_data_points.begin(), state.selected_data_points.end());
+    state.selected_data_points.erase(
+        std::unique(state.selected_data_points.begin(), state.selected_data_points.end()),
+        state.selected_data_points.end());
+}
+
+void toggle_selected_data_point(AppState& state, std::size_t index) {
+    if (!state.analysis || index >= source_sample_count(state)) {
+        return;
+    }
+    normalize_selected_data_points(state);
+    const auto found = std::lower_bound(state.selected_data_points.begin(),
+                                        state.selected_data_points.end(), index);
+    if (found != state.selected_data_points.end() && *found == index) {
+        state.selected_data_points.erase(found);
+        state.status = "Removed point " + format_count(index) + " from fit selection";
+    } else {
+        state.selected_data_points.insert(found, index);
+        state.status = "Selected point " + format_count(index) + " for function fit";
+    }
+}
+
+std::vector<SelectedPointSample> collect_selected_point_samples(AppState& state) {
+    normalize_selected_data_points(state);
+    std::vector<SelectedPointSample> samples;
+    if (!state.analysis || state.selected_data_points.empty()) {
+        return samples;
+    }
+
+    std::vector<std::size_t> indices = state.selected_data_points;
+    if (indices.size() > kFunctionFitMaxPoints) {
+        std::vector<std::size_t> reduced;
+        reduced.reserve(kFunctionFitMaxPoints);
+        for (std::size_t i = 0; i < kFunctionFitMaxPoints; ++i) {
+            const std::size_t source_index =
+                (i * (indices.size() - 1u)) / (kFunctionFitMaxPoints - 1u);
+            reduced.push_back(indices[source_index]);
+        }
+        indices = std::move(reduced);
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    }
+
+    samples.reserve(indices.size());
+    for (std::size_t index : indices) {
+        ensure_lazy_blocks(state, index, index);
+        if (const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, index)) {
+            samples.push_back({index, static_cast<double>(*scalar)});
+        }
+    }
+    return samples;
+}
+
+std::uint64_t next_random_sample_seed(std::uint64_t value) {
+    return value * 6364136223846793005ull + 1442695040888963407ull;
+}
+
+void select_random_sample_points(AppState& state) {
+    const std::size_t count = source_sample_count(state);
+    if (!state.analysis || count == 0u) {
+        state.status = "Load source data before sampling points";
+        return;
+    }
+
+    const int requested = std::clamp(state.random_sample_count, 1, 4096);
+    state.random_sample_count = requested;
+    std::uint64_t seed =
+        state.random_sample_seed == 0u ? 0x544852595354ull : state.random_sample_seed;
+    std::vector<std::size_t> points;
+    points.reserve(static_cast<std::size_t>(requested));
+    for (int i = 0; i < requested; ++i) {
+        seed = next_random_sample_seed(seed);
+        points.push_back(static_cast<std::size_t>(seed % count));
+    }
+    state.random_sample_seed = seed;
+    std::sort(points.begin(), points.end());
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    state.selected_data_points = std::move(points);
+    state.point_selection_mode = true;
+    state.property_tab = PropertyTab::Points;
+    state.status =
+        "Selected " + format_count(state.selected_data_points.size()) + " random sample points";
+}
+
+double function_basis_with_params(WaveFunctionKind function, std::size_t point_index,
+                                  double data_spatial_period_nm, double wavelength_nm,
+                                  double phase_nm, double rotation_degrees) {
+    const double x_nm = static_cast<double>(point_index) * data_spatial_period_nm;
+    const double unit_x = (x_nm - phase_nm) / std::max(0.000001, wavelength_nm);
+    const double raw_y = rotated_function_raw(function, unit_x, rotation_degrees);
+    return (raw_y + 1.0) * 0.5;
+}
+
+bool solve_normal_equations(double normal[3][3], double rhs[3], int dimension,
+                            double coefficients[3]) {
+    double matrix[3][4] = {};
+    for (int row = 0; row < dimension; ++row) {
+        for (int column = 0; column < dimension; ++column) {
+            matrix[row][column] = normal[row][column];
+        }
+        matrix[row][dimension] = rhs[row];
+    }
+
+    for (int pivot = 0; pivot < dimension; ++pivot) {
+        int pivot_row = pivot;
+        double pivot_abs = std::abs(matrix[pivot][pivot]);
+        for (int row = pivot + 1; row < dimension; ++row) {
+            const double candidate_abs = std::abs(matrix[row][pivot]);
+            if (candidate_abs > pivot_abs) {
+                pivot_row = row;
+                pivot_abs = candidate_abs;
+            }
+        }
+        if (pivot_abs < 1.0e-10) {
+            return false;
+        }
+        if (pivot_row != pivot) {
+            for (int column = pivot; column <= dimension; ++column) {
+                std::swap(matrix[pivot][column], matrix[pivot_row][column]);
+            }
+        }
+        const double divisor = matrix[pivot][pivot];
+        for (int column = pivot; column <= dimension; ++column) {
+            matrix[pivot][column] /= divisor;
+        }
+        for (int row = 0; row < dimension; ++row) {
+            if (row == pivot) {
+                continue;
+            }
+            const double factor = matrix[row][pivot];
+            for (int column = pivot; column <= dimension; ++column) {
+                matrix[row][column] -= factor * matrix[pivot][column];
+            }
+        }
+    }
+
+    for (int row = 0; row < dimension; ++row) {
+        coefficients[row] = matrix[row][dimension];
+        if (!std::isfinite(coefficients[row])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+FunctionFitResult score_function_fit(const std::vector<SelectedPointSample>& samples,
+                                     WaveFunctionKind function,
+                                     std::optional<WaveFunctionKind> secondary_function,
+                                     double data_spatial_period_nm, double wavelength_nm,
+                                     double phase_nm, double rotation_degrees, double tolerance) {
+    FunctionFitResult result;
+    result.function = function;
+    result.use_secondary_function = secondary_function.has_value();
+    result.secondary_function = secondary_function.value_or(WaveFunctionKind::Cosine);
+    result.data_spatial_period_nm = data_spatial_period_nm;
+    result.wavelength_nm = wavelength_nm;
+    result.phase_nm = phase_nm;
+    result.rotation_degrees = rotation_degrees;
+    result.tested = samples.size();
+    if (samples.size() < 2u) {
+        return result;
+    }
+
+    const int dimension = secondary_function ? 3 : 2;
+    double normal[3][3] = {};
+    double rhs[3] = {};
+    for (const SelectedPointSample& sample : samples) {
+        const double primary =
+            function_basis_with_params(function, sample.index, data_spatial_period_nm,
+                                       wavelength_nm, phase_nm, rotation_degrees);
+        const double secondary =
+            secondary_function ? function_basis_with_params(*secondary_function, sample.index,
+                                                            data_spatial_period_nm, wavelength_nm,
+                                                            phase_nm, rotation_degrees)
+                               : 0.0;
+        const double features[3] = {1.0, primary, secondary};
+        for (int row = 0; row < dimension; ++row) {
+            rhs[row] += features[row] * sample.value;
+            for (int column = 0; column < dimension; ++column) {
+                normal[row][column] += features[row] * features[column];
+            }
+        }
+    }
+
+    double coefficients[3] = {};
+    if (!solve_normal_equations(normal, rhs, dimension, coefficients)) {
+        return result;
+    }
+
+    result.valid = true;
+    result.amplitude_offset = coefficients[0];
+    result.amplitude = coefficients[1];
+    result.secondary_amplitude = secondary_function ? coefficients[2] : 0.0;
+    double abs_error_sum = 0.0;
+    double max_error = 0.0;
+    for (const SelectedPointSample& sample : samples) {
+        const double primary =
+            function_basis_with_params(function, sample.index, data_spatial_period_nm,
+                                       wavelength_nm, phase_nm, rotation_degrees);
+        const double secondary =
+            secondary_function ? function_basis_with_params(*secondary_function, sample.index,
+                                                            data_spatial_period_nm, wavelength_nm,
+                                                            phase_nm, rotation_degrees)
+                               : 0.0;
+        const double estimate = result.amplitude_offset + result.amplitude * primary +
+                                (secondary_function ? result.secondary_amplitude * secondary : 0.0);
+        const double error = std::abs(estimate - sample.value);
+        abs_error_sum += error;
+        max_error = std::max(max_error, error);
+        if (error <= tolerance) {
+            ++result.hits;
+        }
+    }
+    result.mean_error = abs_error_sum / static_cast<double>(samples.size());
+    result.max_error = max_error;
+    return result;
+}
+
+bool function_fit_is_better(const FunctionFitResult& candidate, const FunctionFitResult& best) {
+    if (!candidate.valid) {
+        return false;
+    }
+    if (!best.valid) {
+        return true;
+    }
+    if (candidate.hits != best.hits) {
+        return candidate.hits > best.hits;
+    }
+    if (std::abs(candidate.max_error - best.max_error) > 1.0e-12) {
+        return candidate.max_error < best.max_error;
+    }
+    if (std::abs(candidate.mean_error - best.mean_error) > 1.0e-12) {
+        return candidate.mean_error < best.mean_error;
+    }
+    return !candidate.use_secondary_function && best.use_secondary_function;
+}
+
+FunctionFitResult scan_function_fit_grid(const std::vector<SelectedPointSample>& samples,
+                                         WaveFunctionKind function,
+                                         std::optional<WaveFunctionKind> secondary_function,
+                                         double current_period_nm, double tolerance) {
+    FunctionFitResult best;
+    if (samples.size() < 2u) {
+        return best;
+    }
+
+    const std::size_t first_index = samples.front().index;
+    const std::size_t last_index = samples.back().index;
+    for (int si = 0; si < kFunctionFitSpatialPeriodSteps; ++si) {
+        const double st =
+            kFunctionFitSpatialPeriodSteps > 1
+                ? static_cast<double>(si) / static_cast<double>(kFunctionFitSpatialPeriodSteps - 1)
+                : 0.5;
+        const double period_nm = log_lerp(current_period_nm * 0.1, current_period_nm * 10.0, st);
+        const double span_nm =
+            std::max(period_nm, static_cast<double>(last_index - first_index + 1u) * period_nm);
+        const double min_wavelength = std::max(0.000001, std::min(period_nm, span_nm) / 16.0);
+        const double max_wavelength =
+            std::max({min_wavelength * 2.0, period_nm * 256.0, span_nm * 4.0});
+        const double anchor_nm = static_cast<double>(first_index) * period_nm;
+        for (int wi = 0; wi < kFunctionFitWavelengthSteps; ++wi) {
+            const double wt =
+                kFunctionFitWavelengthSteps > 1
+                    ? static_cast<double>(wi) / static_cast<double>(kFunctionFitWavelengthSteps - 1)
+                    : 0.0;
+            const double wavelength_nm = log_lerp(min_wavelength, max_wavelength, wt);
+            for (int pi = 0; pi < kFunctionFitPhaseSteps; ++pi) {
+                const double pt =
+                    kFunctionFitPhaseSteps > 1
+                        ? static_cast<double>(pi) / static_cast<double>(kFunctionFitPhaseSteps - 1)
+                        : 0.0;
+                const double phase_nm = anchor_nm - wavelength_nm * 0.5 + wavelength_nm * pt;
+                for (int ri = 0; ri < kFunctionFitRotationSteps; ++ri) {
+                    const double rt = kFunctionFitRotationSteps > 1
+                                          ? static_cast<double>(ri) /
+                                                static_cast<double>(kFunctionFitRotationSteps - 1)
+                                          : 0.5;
+                    const double rotation_degrees = -90.0 + 180.0 * rt;
+                    const FunctionFitResult score =
+                        score_function_fit(samples, function, secondary_function, period_nm,
+                                           wavelength_nm, phase_nm, rotation_degrees, tolerance);
+                    if (function_fit_is_better(score, best)) {
+                        best = score;
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
+FunctionFitResult fit_function_to_selected_points(AppState& state) {
+    const std::vector<SelectedPointSample> samples = collect_selected_point_samples(state);
+    FunctionFitResult best;
+    if (samples.size() < 2u) {
+        return best;
+    }
+
+    const double period_nm = data_spatial_period_nm(state);
+    const double tolerance = std::max(0.000001, static_cast<double>(state.wave_tolerance));
+    std::vector<FunctionFitResult> best_singles;
+    best_singles.reserve(kWaveFunctionKinds.size());
+    for (WaveFunctionKind function : kWaveFunctionKinds) {
+        FunctionFitResult score =
+            scan_function_fit_grid(samples, function, std::nullopt, period_nm, tolerance);
+        if (score.valid) {
+            best_singles.push_back(score);
+        }
+        if (function_fit_is_better(score, best)) {
+            best = score;
+        }
+    }
+
+    std::sort(best_singles.begin(), best_singles.end(),
+              [](const FunctionFitResult& left, const FunctionFitResult& right) {
+                  return function_fit_is_better(left, right);
+              });
+
+    if (state.fit_function_combinations && best_singles.size() >= 2u) {
+        const std::size_t candidate_count =
+            std::min<std::size_t>(best_singles.size(), kFunctionFitTopSingleCount);
+        for (std::size_t a = 0; a < candidate_count; ++a) {
+            for (std::size_t b = a + 1u; b < candidate_count; ++b) {
+                FunctionFitResult score =
+                    scan_function_fit_grid(samples, best_singles[a].function,
+                                           best_singles[b].function, period_nm, tolerance);
+                if (function_fit_is_better(score, best)) {
+                    best = score;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+void apply_function_fit_result(AppState& state, Entity& entity, const FunctionFitResult& fit) {
+    if (!fit.valid || entity.type != EntityType::Wave) {
+        return;
+    }
+    if (Entity* data = data_entity(state)) {
+        data->data.spatial_period_nm = std::max(0.000001, fit.data_spatial_period_nm);
+    }
+    entity.wave.function = fit.function;
+    entity.wave.use_secondary_function = fit.use_secondary_function;
+    entity.wave.secondary_function = fit.secondary_function;
+    entity.wave.wavelength_nm = fit.wavelength_nm;
+    entity.wave.amplitude = fit.amplitude;
+    entity.wave.secondary_amplitude = fit.secondary_amplitude;
+    entity.wave.amplitude_offset = fit.amplitude_offset;
+    entity.wave.phase_nm = fit.phase_nm;
+    entity.wave.rotation_degrees = fit.rotation_degrees;
+    entity.wave.wavelength_modifiers.clear();
+}
+
+void fit_selected_points_to_wave(AppState& state) {
+    if (state.selected_data_points.size() < 2u) {
+        state.status = "Select at least two data points before fitting a function";
+        return;
+    }
+
+    Entity* selected = find_entity(state, state.selected_entity_id);
+    if (!selected || selected->type != EntityType::Wave) {
+        selected =
+            &create_wave_entity(state, "function fit " + std::to_string(state.wave_serial++));
+    }
+
+    state.status = "Fitting function candidates over selected points";
+    const FunctionFitResult fit = fit_function_to_selected_points(state);
+    if (!fit.valid) {
+        state.status = "No stable function fit found for selected points";
+        return;
+    }
+
+    apply_function_fit_result(state, *selected, fit);
+    state.property_tab = PropertyTab::Wave;
+    std::string function_label = wave_function_name(fit.function);
+    if (fit.use_secondary_function) {
+        function_label += " + ";
+        function_label += wave_function_name(fit.secondary_function);
+    }
+    state.status = "Fitted " + selected->name + " with " + function_label + ": " +
+                   format_count(fit.hits) + "/" + format_count(fit.tested) +
+                   " selected points, max error " + std::to_string(fit.max_error);
 }
 
 std::vector<thrystr::app::Scalar> collect_scalars_for_range(AppState& state, std::size_t first,
@@ -2840,10 +3650,15 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
         write_string_le(output, entity.name);
         write_value(entity.data.spatial_period_nm);
         write_value(entity.data.sample_bits);
+        write_value(static_cast<std::uint32_t>(entity.wave.function));
+        write_value(static_cast<std::uint8_t>(entity.wave.use_secondary_function ? 1u : 0u));
+        write_value(static_cast<std::uint32_t>(entity.wave.secondary_function));
         write_value(entity.wave.wavelength_nm);
         write_value(entity.wave.amplitude);
+        write_value(entity.wave.secondary_amplitude);
         write_value(entity.wave.amplitude_offset);
         write_value(entity.wave.phase_nm);
+        write_value(entity.wave.rotation_degrees);
         const auto modifier_count =
             static_cast<std::uint32_t>(entity.wave.wavelength_modifiers.size());
         write_value(modifier_count);
@@ -2950,7 +3765,7 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     const std::uint32_t version = read_binary_le<std::uint32_t>(input);
     const bool portable_payload = version >= 4;
     if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 &&
-        version != kWaveSettingsVersion) {
+        version != 6 && version != kWaveSettingsVersion) {
         throw std::runtime_error("unsupported wave settings version");
     }
     if (portable_payload) {
@@ -3025,10 +3840,24 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
             entity.data.sample_bits =
                 version >= 6 ? normalize_sample_bits(read_value.template operator()<std::uint8_t>())
                              : 8u;
+            if (version >= 7) {
+                entity.wave.function =
+                    normalize_wave_function_kind(read_value.template operator()<std::uint32_t>());
+                entity.wave.use_secondary_function =
+                    read_value.template operator()<std::uint8_t>() != 0u;
+                entity.wave.secondary_function =
+                    normalize_wave_function_kind(read_value.template operator()<std::uint32_t>());
+            }
             entity.wave.wavelength_nm = read_value.template operator()<double>();
             entity.wave.amplitude = read_value.template operator()<double>();
+            if (version >= 7) {
+                entity.wave.secondary_amplitude = read_value.template operator()<double>();
+            }
             entity.wave.amplitude_offset = read_value.template operator()<double>();
             entity.wave.phase_nm = read_value.template operator()<double>();
+            if (version >= 7) {
+                entity.wave.rotation_degrees = read_value.template operator()<double>();
+            }
             const std::uint32_t modifier_count = read_value.template operator()<std::uint32_t>();
             if (modifier_count > kMaxWaveSettingsItems) {
                 throw std::runtime_error("wave settings modifier count too large");
@@ -4006,6 +4835,89 @@ StartupAction draw_splash_window(AppState& state, GLFWwindow* window,
     return choice;
 }
 
+bool wave_function_selector(const char* label, WaveFunctionKind* function) {
+    bool changed = false;
+    const char* current = wave_function_name(*function);
+    if (ImGui::BeginCombo(label, current)) {
+        for (WaveFunctionKind candidate : kWaveFunctionKinds) {
+            const bool selected = candidate == *function;
+            if (ImGui::Selectable(wave_function_name(candidate), selected)) {
+                *function = candidate;
+                changed = true;
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+bool property_tab_enabled(const AppState& state, PropertyTab tab, const Entity* selected) {
+    switch (tab) {
+    case PropertyTab::Entities:
+    case PropertyTab::View:
+        return true;
+    case PropertyTab::Data:
+    case PropertyTab::Mappers:
+        return data_entity(state) != nullptr || state.analysis.has_value();
+    case PropertyTab::Wave:
+        return selected && selected->type == EntityType::Wave;
+    case PropertyTab::Fit:
+    case PropertyTab::Points:
+        return state.analysis.has_value();
+    }
+    return true;
+}
+
+const char* property_tab_label(PropertyTab tab) {
+    switch (tab) {
+    case PropertyTab::Entities:
+        return "Entities";
+    case PropertyTab::Data:
+        return "Data";
+    case PropertyTab::Wave:
+        return "Wave";
+    case PropertyTab::Fit:
+        return "Fit";
+    case PropertyTab::Points:
+        return "Points";
+    case PropertyTab::Mappers:
+        return "Map";
+    case PropertyTab::View:
+        return "View";
+    }
+    return "Entities";
+}
+
+void draw_property_tabs(AppState& state, const Entity* selected) {
+    constexpr std::array<PropertyTab, 7> tabs = {
+        PropertyTab::Entities, PropertyTab::Data,    PropertyTab::Wave, PropertyTab::Fit,
+        PropertyTab::Points,   PropertyTab::Mappers, PropertyTab::View,
+    };
+    if (!property_tab_enabled(state, state.property_tab, selected)) {
+        state.property_tab = PropertyTab::Entities;
+    }
+
+    for (std::size_t i = 0; i < tabs.size(); ++i) {
+        const PropertyTab tab = tabs[i];
+        const bool enabled = property_tab_enabled(state, tab, selected);
+        if (!enabled) {
+            ImGui::BeginDisabled();
+        }
+        if (playback_speed_button(property_tab_label(tab), state.property_tab == tab, 72.0f)) {
+            state.property_tab = tab;
+        }
+        if (!enabled) {
+            ImGui::EndDisabled();
+        }
+        if (i + 1u < tabs.size() && (i % 3u) != 2u) {
+            ImGui::SameLine();
+        }
+    }
+}
+
 void draw_entity_toolbox(AppState& state) {
     if (!state.workspace_open) {
         return;
@@ -4019,35 +4931,56 @@ void draw_entity_toolbox(AppState& state) {
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoCollapse);
 
-    skald::SectionHeader("Toolbox");
-    skald::SectionHeader("Entities");
-    if (skald::AccentButton("+ Wave", ImVec2(92.0f, 0.0f))) {
-        create_wave_entity(state);
+    if (!find_entity(state, state.selected_entity_id) && !state.entities.empty()) {
+        select_entity(state, state.entities.front().id);
     }
-    ImGui::SameLine();
-    if (skald::GhostButton("Fit Wave", ImVec2(96.0f, 0.0f))) {
-        create_interpolated_wave(state);
-    }
-    ImGui::SameLine();
-    if (skald::GhostButton("Section", ImVec2(92.0f, 0.0f))) {
-        create_section(state);
-    }
+    Entity* selected = find_entity(state, state.selected_entity_id);
 
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    for (Entity& entity : state.entities) {
-        ImGui::PushID(entity.id);
-        ImGui::Checkbox("##visible", &entity.visible);
-        ImGui::SameLine();
-        const std::string label = entity.name + "  [" + entity_type_name(entity.type) + "]";
-        if (ImGui::Selectable(label.c_str(), entity.id == state.selected_entity_id)) {
-            select_entity(state, entity.id);
-        }
-        ImGui::PopID();
-    }
+    skald::SectionHeader("Properties");
+    draw_property_tabs(state, selected);
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
     Entity* data = data_entity(state);
-    if (data || state.analysis) {
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    switch (state.property_tab) {
+    case PropertyTab::Entities:
+        skald::SectionHeader("Entities");
+        if (skald::AccentButton("+ Wave", ImVec2(92.0f, 0.0f))) {
+            create_wave_entity(state);
+        }
+        ImGui::SameLine();
+        if (skald::GhostButton("Fit Wave", ImVec2(96.0f, 0.0f))) {
+            create_interpolated_wave(state);
+        }
+        ImGui::SameLine();
+        if (skald::GhostButton("Section", ImVec2(92.0f, 0.0f))) {
+            create_section(state);
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        for (Entity& entity : state.entities) {
+            ImGui::PushID(entity.id);
+            ImGui::Checkbox("##visible", &entity.visible);
+            ImGui::SameLine();
+            const std::string label = entity.name + "  [" + entity_type_name(entity.type) + "]";
+            if (ImGui::Selectable(label.c_str(), entity.id == state.selected_entity_id)) {
+                select_entity(state, entity.id);
+                selected = &entity;
+            }
+            ImGui::PopID();
+        }
+        selected = find_entity(state, state.selected_entity_id);
+        if (selected) {
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            skald::SectionHeader("Selection");
+            sync_entity_name(state);
+            if (ImGui::InputText("Name", state.entity_name, sizeof(state.entity_name))) {
+                selected->name = state.entity_name;
+            }
+            skald::PillToggle("Visible", &selected->visible);
+        }
+        break;
+
+    case PropertyTab::Data:
         skald::SectionHeader("Data");
         if (state.analysis) {
             const thrystr::Analysis& a = *state.analysis;
@@ -4089,6 +5022,84 @@ void draw_entity_toolbox(AppState& state) {
         }
 
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        skald::SectionHeader("Load Params");
+        {
+            bool params_changed = false;
+            bool lazy_block_changed = false;
+            double max_slope = static_cast<double>(state.max_slope);
+            double wave_tolerance = static_cast<double>(state.wave_tolerance);
+            params_changed |=
+                value_bar_double("max slope", &max_slope, 0.001, "%.4f", state.fonts.mono);
+            params_changed |= value_bar_double("wave tolerance", &wave_tolerance, 0.0001, "%.5f",
+                                               state.fonts.mono);
+            params_changed |=
+                value_bar_int("phase steps", &state.phase_steps, 4.0, state.fonts.mono);
+            params_changed |=
+                value_bar_int("phase samples", &state.phase_test_points, 512.0, state.fonts.mono);
+            lazy_block_changed |=
+                value_bar_int("lazy block MiB", &state.lazy_block_mib, 0.05, state.fonts.mono);
+            state.max_slope = static_cast<float>(max_slope);
+            state.wave_tolerance = static_cast<float>(wave_tolerance);
+            if (lazy_block_changed) {
+                state.lazy_block_mib = std::clamp(state.lazy_block_mib, 1, 10);
+                reload_if_file_selected(state);
+            }
+            if (params_changed) {
+                refresh_analysis_params(state);
+            }
+            if (skald::GhostButton("Fit Phases", ImVec2(112.0f, 0.0f))) {
+                fit_wave_phases(state);
+            }
+        }
+        break;
+
+    case PropertyTab::Wave:
+        if (!selected || selected->type != EntityType::Wave) {
+            skald::KvRowStatus("wave", "select a wave", skald::BadgeTone::Muted);
+            break;
+        }
+        skald::SectionHeader("Wave");
+        sync_entity_name(state);
+        if (ImGui::InputText("Name", state.entity_name, sizeof(state.entity_name))) {
+            selected->name = state.entity_name;
+        }
+        skald::PillToggle("Visible", &selected->visible);
+        wave_function_selector("Function", &selected->wave.function);
+        skald::PillToggle("Secondary function", &selected->wave.use_secondary_function);
+        if (selected->wave.use_secondary_function) {
+            wave_function_selector("Secondary", &selected->wave.secondary_function);
+            value_bar_double("secondary amplitude", &selected->wave.secondary_amplitude, 0.01,
+                             "%.4f", state.fonts.mono);
+        }
+        value_bar_double("wave spatial distance nm", &selected->wave.wavelength_nm, 0.10, "%.4f",
+                         state.fonts.mono);
+        value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f", state.fonts.mono);
+        value_bar_double("amplitude offset", &selected->wave.amplitude_offset, 0.01, "%.4f",
+                         state.fonts.mono);
+        value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f", state.fonts.mono);
+        value_bar_double("z rotation deg", &selected->wave.rotation_degrees, 0.25, "%.3f",
+                         state.fonts.mono);
+        skald::KvRow("modifiers", "%s",
+                     format_count(selected->wave.wavelength_modifiers.size()).c_str());
+        if (skald::GhostButton("Fit Selection", ImVec2(124.0f, 0.0f))) {
+            const WaveFitResult fit = fit_wave_to_selection(state, selected->wave);
+            selected->wave.wavelength_nm = fit.wavelength_nm;
+            selected->wave.phase_nm = fit.phase_nm;
+            rebuild_wavelength_modifiers(state, selected->wave);
+            const auto [first, last] = analysis_selection_bounds(state);
+            const WaveFitResult final_fit = score_wave_on_range(state, selected->wave, first, last);
+            state.status = "Fitted " + selected->name + ": " + format_count(final_fit.hits) + "/" +
+                           format_count(final_fit.tested) + " point hits, " +
+                           format_count(selected->wave.wavelength_modifiers.size()) +
+                           " wavelength keys";
+        }
+        ImGui::SameLine();
+        if (skald::GhostButton("Fit Points", ImVec2(104.0f, 0.0f))) {
+            fit_selected_points_to_wave(state);
+        }
+        break;
+
+    case PropertyTab::Fit:
         skald::SectionHeader("X-Line Section");
         if (state.analysis && source_sample_count(state) > 0u) {
             if (!state.segment.active) {
@@ -4211,79 +5222,68 @@ void draw_entity_toolbox(AppState& state) {
         } else {
             skald::KvRowStatus("section", "no data", skald::BadgeTone::Muted);
         }
-    }
-
-    if (!find_entity(state, state.selected_entity_id) && !state.entities.empty()) {
-        select_entity(state, state.entities.front().id);
-    }
-    Entity* selected = find_entity(state, state.selected_entity_id);
-    if (!selected) {
-        ImGui::End();
-        return;
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    skald::SectionHeader("Selection");
-    sync_entity_name(state);
-    if (ImGui::InputText("Name", state.entity_name, sizeof(state.entity_name))) {
-        selected->name = state.entity_name;
-    }
-    skald::PillToggle("Visible", &selected->visible);
-
-    if (selected->type == EntityType::Data) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Load Params");
-        bool params_changed = false;
-        bool lazy_block_changed = false;
-        double max_slope = static_cast<double>(state.max_slope);
-        double wave_tolerance = static_cast<double>(state.wave_tolerance);
-        params_changed |=
-            value_bar_double("max slope", &max_slope, 0.001, "%.4f", state.fonts.mono);
-        params_changed |=
-            value_bar_double("wave tolerance", &wave_tolerance, 0.0001, "%.5f", state.fonts.mono);
-        params_changed |= value_bar_int("phase steps", &state.phase_steps, 4.0, state.fonts.mono);
-        params_changed |=
-            value_bar_int("phase samples", &state.phase_test_points, 512.0, state.fonts.mono);
-        lazy_block_changed |=
-            value_bar_int("lazy block MiB", &state.lazy_block_mib, 0.05, state.fonts.mono);
-        state.max_slope = static_cast<float>(max_slope);
-        state.wave_tolerance = static_cast<float>(wave_tolerance);
-        if (lazy_block_changed) {
-            state.lazy_block_mib = std::clamp(state.lazy_block_mib, 1, 10);
-            reload_if_file_selected(state);
+        skald::SectionHeader("Selected Point Fit");
+        skald::KvRow("selected points", "%s",
+                     format_count(state.selected_data_points.size()).c_str());
+        skald::PillToggle("Function combinations", &state.fit_function_combinations);
+        if (skald::AccentButton("Fit Selected Points", ImVec2(158.0f, 0.0f))) {
+            fit_selected_points_to_wave(state);
         }
-        if (params_changed) {
-            refresh_analysis_params(state);
-        }
-        if (skald::GhostButton("Fit Phases", ImVec2(112.0f, 0.0f))) {
-            fit_wave_phases(state);
-        }
+        break;
 
+    case PropertyTab::Points:
+        skald::SectionHeader("Point Selection");
+        skald::PillToggle("Point pick mode", &state.point_selection_mode);
+        if (state.point_selection_mode) {
+            state.segment_selection_mode = false;
+        }
+        skald::KvRow("selected", "%s", format_count(state.selected_data_points.size()).c_str());
+        if (!state.selected_data_points.empty()) {
+            normalize_selected_data_points(state);
+            skald::KvRow("first", "%s", format_count(state.selected_data_points.front()).c_str());
+            skald::KvRow("last", "%s", format_count(state.selected_data_points.back()).c_str());
+        }
+        if (skald::GhostButton("Clear Points", ImVec2(118.0f, 0.0f))) {
+            state.selected_data_points.clear();
+        }
+        ImGui::SameLine();
+        if (skald::AccentButton("Fit Points", ImVec2(104.0f, 0.0f))) {
+            fit_selected_points_to_wave(state);
+        }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        skald::SectionHeader("Random Sampling");
+        value_bar_int("sample count", &state.random_sample_count, 1.0, state.fonts.mono);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputScalar("seed", ImGuiDataType_U64, &state.random_sample_seed);
+        if (skald::AccentButton("Load Random Sampling", ImVec2(176.0f, 0.0f))) {
+            select_random_sample_points(state);
+        }
+        break;
+
+    case PropertyTab::Mappers:
         draw_value_mapper_stack(state);
-    } else {
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Wave");
-        value_bar_double("wave spatial distance nm", &selected->wave.wavelength_nm, 0.10, "%.4f",
-                         state.fonts.mono);
-        value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f", state.fonts.mono);
-        value_bar_double("amplitude offset", &selected->wave.amplitude_offset, 0.01, "%.4f",
-                         state.fonts.mono);
-        value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f", state.fonts.mono);
-        skald::KvRow("modifiers", "%s",
-                     format_count(selected->wave.wavelength_modifiers.size()).c_str());
-        if (skald::GhostButton("Fit Selection", ImVec2(124.0f, 0.0f))) {
-            const WaveFitResult fit = fit_wave_to_selection(state, selected->wave);
-            selected->wave.wavelength_nm = fit.wavelength_nm;
-            selected->wave.phase_nm = fit.phase_nm;
-            rebuild_wavelength_modifiers(state, selected->wave);
-            const auto [first, last] = analysis_selection_bounds(state);
-            const WaveFitResult final_fit = score_wave_on_range(state, selected->wave, first, last);
-            state.status = "Fitted " + selected->name + ": " + format_count(final_fit.hits) + "/" +
-                           format_count(final_fit.tested) + " point hits, " +
-                           format_count(selected->wave.wavelength_modifiers.size()) +
-                           " wavelength keys";
+        break;
+
+    case PropertyTab::View:
+        skald::SectionHeader("Render");
+        skald::PillToggle("Data points", &state.show_points);
+        ImGui::SameLine();
+        skald::PillToggle("Data lines", &state.show_lines);
+        ImGui::SameLine();
+        skald::PillToggle("Reconstruction", &state.show_reconstruction_only);
+        {
+            double zoom_x = static_cast<double>(state.zoom_x);
+            double zoom_y = static_cast<double>(state.zoom_y);
+            if (value_bar_double("x zoom", &zoom_x, 0.01, "%.2f", state.fonts.mono)) {
+                state.zoom_x = static_cast<float>(zoom_x);
+            }
+            if (value_bar_double("y zoom", &zoom_y, 0.01, "%.2f", state.fonts.mono)) {
+                state.zoom_y = static_cast<float>(zoom_y);
+            }
         }
+        skald::PillToggle("Wheel scroll", &state.wheel_scroll_mode);
+        break;
     }
 
     ImGui::End();
@@ -4363,6 +5363,28 @@ void draw_data_point_markers(ImDrawList* draw, const AppState& state, std::size_
                                 ImVec2(x + 0.5f, min_y[index] + 0.5f), kDataPointMed);
         } else {
             draw->AddLine(ImVec2(x, min_y[index]), ImVec2(x, max_y[index]), kDataPointLo, 1.0f);
+        }
+    }
+}
+
+void draw_selected_data_point_markers(ImDrawList* draw, const AppState& state, std::size_t first,
+                                      std::size_t last, float plot_left, float plot_top,
+                                      float plot_bottom, float x_step, float y_zoom) {
+    if (!draw || state.selected_data_points.empty()) {
+        return;
+    }
+    const auto lower = std::lower_bound(state.selected_data_points.begin(),
+                                        state.selected_data_points.end(), first);
+    const auto upper = std::upper_bound(state.selected_data_points.begin(),
+                                        state.selected_data_points.end(), last);
+    for (auto it = lower; it != upper; ++it) {
+        const std::size_t index = *it;
+        if (const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, index)) {
+            const float x = plot_left + static_cast<float>(index) * x_step;
+            const float y = y_for_value(static_cast<float>(*scalar), plot_top, plot_bottom, y_zoom);
+            draw->AddCircleFilled(ImVec2(x, y), 5.0f,
+                                  skald::tokens::with_alpha(skald::tokens::accents::gold, 0.92f));
+            draw->AddCircle(ImVec2(x, y), 7.0f, skald::tokens::ink::primary, 0, 1.4f);
         }
     }
 }
@@ -4976,11 +5998,28 @@ void draw_plot(AppState& state) {
     ImGui::SameLine();
     if (playback_speed_button("segment", state.segment_selection_mode, 78.0f)) {
         state.segment_selection_mode = !state.segment_selection_mode;
+        if (state.segment_selection_mode) {
+            state.point_selection_mode = false;
+        }
         state.selection_drag_handle = 0;
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(state.segment_selection_mode
                               ? "Timeline clicks edit the segment selection"
+                              : "Timeline clicks move the playhead");
+    }
+    ImGui::SameLine();
+    if (playback_speed_button("points", state.point_selection_mode, 70.0f)) {
+        state.point_selection_mode = !state.point_selection_mode;
+        if (state.point_selection_mode) {
+            state.segment_selection_mode = false;
+            state.selection_drag_handle = 0;
+            state.property_tab = PropertyTab::Points;
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(state.point_selection_mode
+                              ? "Timeline clicks toggle individual fit points"
                               : "Timeline clicks move the playhead");
     }
     if (ImGui::GetContentRegionAvail().x > 330.0f) {
@@ -5173,7 +6212,10 @@ void draw_plot(AppState& state) {
 
     if (plot_hovered && !playhead_scrub_claimed && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const std::size_t index = index_from_mouse();
-        if (!state.segment_selection_mode) {
+        if (state.point_selection_mode) {
+            toggle_selected_data_point(state, index);
+            set_playhead_index(state, index, false);
+        } else if (!state.segment_selection_mode) {
             set_playhead_index(state, index, false);
         } else if (!state.segment.active) {
             state.segment.active = true;
@@ -5262,6 +6304,8 @@ void draw_plot(AppState& state) {
         draw_data_point_markers(draw, state, first, last, plot_left, plot_top, plot_bottom, x_step,
                                 y_zoom, clip_min, clip_max);
     }
+    draw_selected_data_point_markers(draw, state, first, last, plot_left, plot_top, plot_bottom,
+                                     x_step, y_zoom);
 
     draw->AddRect(ImVec2(plot_left, plot_top), ImVec2(plot_right, plot_bottom),
                   skald::tokens::border::default_, 0.0f, 0, 1.0f);
