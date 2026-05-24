@@ -231,7 +231,7 @@ struct AppState {
     int chrome_start_window_h = 0;
     bool show_points = true;
     bool show_lines = true;
-    bool wheel_scroll_mode = false;
+    bool wheel_scroll_mode = true;
     bool segment_selection_mode = false;
     float zoom_x = 1.0f;
     float zoom_y = 1.0f;
@@ -1237,7 +1237,7 @@ void open_empty_workspace(AppState& state) {
     state.path[0] = '\0';
     state.selected_entity_id = 0;
     state.entity_name_id = 0;
-    state.wheel_scroll_mode = false;
+    state.wheel_scroll_mode = true;
     state.segment_selection_mode = false;
     state.xline_playing = false;
     state.playhead_dragging = false;
@@ -3074,6 +3074,8 @@ void draw_plot(AppState& state) {
 
     ImGui::BeginChild("##plot_scroll", ImVec2(0.0f, 0.0f), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
+    const bool child_hovered =
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     if (state.pending_scroll_index) {
         const float target_scroll =
             static_cast<float>(*state.pending_scroll_index) * x_step +
@@ -3081,6 +3083,26 @@ void draw_plot(AppState& state) {
             ImGui::GetWindowWidth() * 0.5f;
         ImGui::SetScrollX(std::max(0.0f, target_scroll));
         state.pending_scroll_index.reset();
+    }
+    if (state.xline_playing) {
+        const float child_width = ImGui::GetWindowWidth();
+        const float playhead_local =
+            margin_left + static_cast<float>(state.playhead_index) * x_step;
+        const float visible_midpoint = ImGui::GetScrollX() + child_width * 0.5f;
+        if (playhead_local >= visible_midpoint) {
+            ImGui::SetScrollX(std::max(0.0f, playhead_local - child_width * 0.5f));
+        }
+    }
+    if (child_hovered &&
+        state.wheel_scroll_mode &&
+        ImGui::GetIO().MouseWheel != 0.0f &&
+        !ImGui::GetIO().KeyCtrl &&
+        !ImGui::GetIO().KeySuper) {
+        const float scroll_step =
+            std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
+        ImGui::SetScrollX(std::max(0.0f,
+                                   ImGui::GetScrollX() -
+                                       ImGui::GetIO().MouseWheel * scroll_step));
     }
     ImGui::InvisibleButton("##plot_canvas", ImVec2(logical_width, plot_height));
     const bool plot_hovered = ImGui::IsItemHovered();
@@ -3101,12 +3123,12 @@ void draw_plot(AppState& state) {
         if (io.KeyCtrl || io.KeySuper) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             state.zoom_y = std::max(0.01f, state.zoom_y * factor);
-        } else if (io.KeyShift || state.wheel_scroll_mode) {
+        } else if (io.KeyShift && !state.wheel_scroll_mode) {
             const float scroll_step =
                 std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
             ImGui::SetScrollX(std::max(0.0f,
                                        ImGui::GetScrollX() - io.MouseWheel * scroll_step));
-        } else {
+        } else if (!state.wheel_scroll_mode) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             const float old_step = x_step;
             const float mouse_index = std::clamp(
@@ -3117,16 +3139,6 @@ void draw_plot(AppState& state) {
             const float new_step = plot_x_step(state);
             const float mouse_local_x = io.MousePos.x - child_pos.x;
             ImGui::SetScrollX(std::max(0.0f, mouse_index * new_step + margin_left - mouse_local_x));
-        }
-    }
-    if (state.xline_playing) {
-        const float playhead_local =
-            margin_left + static_cast<float>(state.playhead_index) * x_step;
-        const float visible_midpoint =
-            ImGui::GetScrollX() + ImGui::GetWindowWidth() * 0.5f;
-        if (playhead_local >= visible_midpoint) {
-            ImGui::SetScrollX(std::max(0.0f,
-                                       playhead_local - ImGui::GetWindowWidth() * 0.5f));
         }
     }
     const float visible_left_local = ImGui::GetScrollX();
