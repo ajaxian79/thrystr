@@ -231,6 +231,8 @@ struct AppState {
     int chrome_start_window_h = 0;
     bool show_points = true;
     bool show_lines = true;
+    bool wheel_scroll_mode = false;
+    bool segment_selection_mode = false;
     float zoom_x = 1.0f;
     float zoom_y = 1.0f;
     float max_slope = thrystr::kDefaultMaxSlope;
@@ -1235,6 +1237,8 @@ void open_empty_workspace(AppState& state) {
     state.path[0] = '\0';
     state.selected_entity_id = 0;
     state.entity_name_id = 0;
+    state.wheel_scroll_mode = false;
+    state.segment_selection_mode = false;
     state.xline_playing = false;
     state.playhead_dragging = false;
     state.playhead_index = 0;
@@ -2886,7 +2890,6 @@ void update_xline_playback(AppState& state) {
     }
     state.playhead_fraction -= static_cast<double>(step_count);
     state.playhead_index = std::min(count - 1u, state.playhead_index + step_count);
-    state.pending_scroll_index = state.playhead_index;
     if (state.playhead_index + 1u >= count) {
         state.xline_playing = false;
         state.playhead_fraction = 0.0;
@@ -3033,6 +3036,29 @@ void draw_plot(AppState& state) {
                        "x %s / hex %s",
                        format_count(state.playhead_index).c_str(),
                        playhead_hex.c_str());
+    ImGui::SameLine();
+    if (playback_speed_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
+                              state.wheel_scroll_mode,
+                              102.0f)) {
+        state.wheel_scroll_mode = !state.wheel_scroll_mode;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(state.wheel_scroll_mode
+                              ? "Mouse wheel scrolls the x timeline"
+                              : "Mouse wheel scales the x timeline");
+    }
+    ImGui::SameLine();
+    if (playback_speed_button("segment",
+                              state.segment_selection_mode,
+                              78.0f)) {
+        state.segment_selection_mode = !state.segment_selection_mode;
+        state.selection_drag_handle = 0;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(state.segment_selection_mode
+                              ? "Timeline clicks edit the segment selection"
+                              : "Timeline clicks move the playhead");
+    }
     if (ImGui::GetContentRegionAvail().x > 330.0f) {
         ImGui::SameLine();
     }
@@ -3072,14 +3098,14 @@ void draw_plot(AppState& state) {
     const float plot_bottom = item_max.y - margin_bottom;
     if (plot_hovered && ImGui::GetIO().MouseWheel != 0.0f) {
         ImGuiIO& io = ImGui::GetIO();
-        if (io.KeyShift) {
+        if (io.KeyCtrl || io.KeySuper) {
+            const float factor = std::pow(1.12f, io.MouseWheel);
+            state.zoom_y = std::max(0.01f, state.zoom_y * factor);
+        } else if (io.KeyShift || state.wheel_scroll_mode) {
             const float scroll_step =
                 std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
             ImGui::SetScrollX(std::max(0.0f,
                                        ImGui::GetScrollX() - io.MouseWheel * scroll_step));
-        } else if (io.KeyCtrl || io.KeySuper) {
-            const float factor = std::pow(1.12f, io.MouseWheel);
-            state.zoom_y = std::max(0.01f, state.zoom_y * factor);
         } else {
             const float factor = std::pow(1.12f, io.MouseWheel);
             const float old_step = x_step;
@@ -3091,6 +3117,16 @@ void draw_plot(AppState& state) {
             const float new_step = plot_x_step(state);
             const float mouse_local_x = io.MousePos.x - child_pos.x;
             ImGui::SetScrollX(std::max(0.0f, mouse_index * new_step + margin_left - mouse_local_x));
+        }
+    }
+    if (state.xline_playing) {
+        const float playhead_local =
+            margin_left + static_cast<float>(state.playhead_index) * x_step;
+        const float visible_midpoint =
+            ImGui::GetScrollX() + ImGui::GetWindowWidth() * 0.5f;
+        if (playhead_local >= visible_midpoint) {
+            ImGui::SetScrollX(std::max(0.0f,
+                                       playhead_local - ImGui::GetWindowWidth() * 0.5f));
         }
     }
     const float visible_left_local = ImGui::GetScrollX();
@@ -3199,7 +3235,9 @@ void draw_plot(AppState& state) {
         !playhead_scrub_claimed &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const std::size_t index = index_from_mouse();
-        if (!state.segment.active) {
+        if (!state.segment_selection_mode) {
+            set_playhead_index(state, index, false);
+        } else if (!state.segment.active) {
             state.segment.active = true;
             state.segment.selection_start = index;
             state.segment.selection_end = index;
@@ -3218,7 +3256,7 @@ void draw_plot(AppState& state) {
             }
         }
     }
-    if (state.selection_drag_handle != 0) {
+    if (state.segment_selection_mode && state.selection_drag_handle != 0) {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             const std::size_t index = index_from_mouse();
             if (state.selection_drag_handle < 0) {
@@ -3230,6 +3268,8 @@ void draw_plot(AppState& state) {
         } else {
             state.selection_drag_handle = 0;
         }
+    } else if (!state.segment_selection_mode) {
+        state.selection_drag_handle = 0;
     }
 
     const Entity* data = data_entity(state);
