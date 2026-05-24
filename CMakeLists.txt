@@ -41,6 +41,31 @@ target_compile_options(thrystr_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>)
 
+add_library(thrystr_model STATIC
+    src/model/dataset.cpp
+    src/model/entity.cpp
+    src/model/fitter.cpp
+    src/model/node_graph.cpp
+    src/model/property_bag.cpp
+    src/model/standard_math.cpp
+    src/model/workspace.cpp)
+target_include_directories(thrystr_model PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_compile_options(thrystr_model PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+
+add_library(thrystr_ui STATIC
+    src/ui/window.cpp)
+target_include_directories(thrystr_ui PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_link_libraries(thrystr_ui PUBLIC thrystr_model)
+target_compile_options(thrystr_ui PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+
 add_library(thrystr_app STATIC
     src/app/workspace.cpp
     src/app/fit_validation.cpp
@@ -49,7 +74,7 @@ add_library(thrystr_app STATIC
 target_include_directories(thrystr_app PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_link_libraries(thrystr_app PUBLIC thrystr_core)
+target_link_libraries(thrystr_app PUBLIC thrystr_core thrystr_model thrystr_ui)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_link_libraries(thrystr_app PUBLIC quadmath)
 endif()
@@ -177,6 +202,11 @@ if(THRYSTR_BUILD_TESTS)
         tests/app_model_tests.cpp)
     target_link_libraries(thrystr_app_tests PRIVATE thrystr_app)
     add_test(NAME thrystr_app_tests COMMAND thrystr_app_tests)
+
+    add_executable(thrystr_model_tests
+        tests/model_tests.cpp)
+    target_link_libraries(thrystr_model_tests PRIVATE thrystr_model thrystr_ui)
+    add_test(NAME thrystr_model_tests COMMAND thrystr_model_tests)
 
     add_executable(thrystr_multi_track_fit_tests
         tests/app_multi_track_fit_tests.cpp)

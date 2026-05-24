@@ -1628,7 +1628,9 @@ std::size_t nice_tick(double raw) {
     return static_cast<std::size_t>(nice * exponent);
 }
 
-const char* entity_type_name(EntityType type) { return type == EntityType::Data ? "data" : "wave"; }
+const char* entity_type_name(EntityType type) {
+    return type == EntityType::Data ? "raw data" : "function";
+}
 
 constexpr std::array<WaveFunctionKind, static_cast<std::size_t>(WaveFunctionKind::Count)>
     kWaveFunctionKinds = {
@@ -2108,7 +2110,8 @@ Entity& create_wave_entity(AppState& state, std::string name = {}) {
     Entity entity;
     entity.id = state.next_entity_id++;
     entity.type = EntityType::Wave;
-    entity.name = name.empty() ? "wave " + std::to_string(state.wave_serial++) : std::move(name);
+    entity.name =
+        name.empty() ? "function " + std::to_string(state.wave_serial++) : std::move(name);
     entity.visible = true;
     entity.wave = {};
     state.entities.push_back(entity);
@@ -2307,7 +2310,7 @@ void create_interpolated_wave(AppState& state) {
     const WaveFitResult final_fit =
         score_wave_on_range(state, wave.wave, analysis_selection_bounds(state).first,
                             analysis_selection_bounds(state).second);
-    state.status = "Created interpolated wave: " + format_count(final_fit.hits) + "/" +
+    state.status = "Created interpolated function: " + format_count(final_fit.hits) + "/" +
                    format_count(final_fit.tested) + " point hits, " +
                    format_count(wave.wave.wavelength_modifiers.size()) + " wavelength keys";
 }
@@ -3171,7 +3174,7 @@ void run_track_auto_fit_worker(AutoFitJob& job, std::filesystem::path source_pat
             }
 
             store_auto_fit_stage(job, segment_index, range,
-                                 "partitioning tracks and fitting waves");
+                                 "partitioning tracks and fitting functions");
             thrystr::app::MultiTrackOptions track_options;
             track_options.tolerance = tolerance;
             track_options.default_spacing_nm = spacing_nm;
@@ -3592,7 +3595,7 @@ void fit_wave_phases(AppState& state) {
         analysis.cosine = thrystr::fit_wave_phase(
             analysis.scalars, true, analysis.wave_scale, static_cast<double>(state.wave_tolerance),
             state.phase_steps, static_cast<std::size_t>(state.phase_test_points));
-        state.status = "Fitted wave phases";
+        state.status = "Fitted function phases";
     } catch (const std::exception& error) {
         state.status = error.what();
     }
@@ -4231,7 +4234,7 @@ void draw_titlebar_wordmark(AppState& state, const char* tagline) {
 void draw_titlebar(AppState& state, GLFWwindow* window) {
     const ImVec2 viewport = begin_titlebar_chrome("##titlebar");
     draw_titlebar_background(viewport);
-    draw_titlebar_wordmark(state, "/ wave workspace");
+    draw_titlebar_wordmark(state, "/ function workspace");
 
     ImGui::SameLine(188.0f);
     if (skald::GhostButton("File", ImVec2(52.0f, 0.0f))) {
@@ -4247,7 +4250,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         if (ImGui::MenuItem("Load Source...")) {
             request_file_dialog(state, DialogPurpose::OpenSource);
         }
-        if (ImGui::MenuItem("Save Wave Data...")) {
+        if (ImGui::MenuItem("Save Function Data...")) {
             request_file_dialog(state, DialogPurpose::SaveWave);
         }
         skald::MutedSeparator();
@@ -4262,11 +4265,11 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         request_file_dialog(state, DialogPurpose::OpenSource);
     }
     ImGui::SameLine();
-    if (toolbar_icon_button(skald::icons::kFolder, "Load wave data")) {
+    if (toolbar_icon_button(skald::icons::kFolder, "Load function data")) {
         request_file_dialog(state, DialogPurpose::LoadWave);
     }
     ImGui::SameLine();
-    if (toolbar_icon_button(skald::icons::kSave, "Save wave data")) {
+    if (toolbar_icon_button(skald::icons::kSave, "Save function data")) {
         request_file_dialog(state, DialogPurpose::SaveWave);
     }
 
@@ -4275,10 +4278,10 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         ImGui::OpenPopup("##create_menu");
     }
     if (ImGui::BeginPopup("##create_menu")) {
-        if (ImGui::MenuItem("Wave", "Ctrl/Cmd+W")) {
+        if (ImGui::MenuItem("Function", "Ctrl/Cmd+W")) {
             create_wave_entity(state);
         }
-        if (ImGui::MenuItem("Interpolated Wave")) {
+        if (ImGui::MenuItem("Interpolated Function")) {
             create_interpolated_wave(state);
         }
         if (ImGui::MenuItem("X-Line Section")) {
@@ -4792,7 +4795,7 @@ StartupAction draw_splash(AppState& state) {
         {"Load source", ""},
     }};
     const skald::SplashChoice splash_choice =
-        skald::Splash("thrystr", "Scalar wave workspace", {},
+        skald::Splash("thrystr", "Scalar function workspace", {},
                       std::span<const skald::SplashAction>(actions.data(), actions.size()),
                       static_cast<ImTextureID>(state.splash_hero_texture), state.splash_hero_size,
                       state.fonts.hero);
@@ -4874,11 +4877,11 @@ bool property_tab_enabled(const AppState& state, PropertyTab tab, const Entity* 
 const char* property_tab_label(PropertyTab tab) {
     switch (tab) {
     case PropertyTab::Entities:
-        return "Entities";
+        return "Layers";
     case PropertyTab::Data:
         return "Data";
     case PropertyTab::Wave:
-        return "Wave";
+        return "Function";
     case PropertyTab::Fit:
         return "Fit";
     case PropertyTab::Points:
@@ -4888,7 +4891,7 @@ const char* property_tab_label(PropertyTab tab) {
     case PropertyTab::View:
         return "View";
     }
-    return "Entities";
+    return "Layers";
 }
 
 void draw_property_tabs(AppState& state, const Entity* selected) {
@@ -4943,12 +4946,12 @@ void draw_entity_toolbox(AppState& state) {
     Entity* data = data_entity(state);
     switch (state.property_tab) {
     case PropertyTab::Entities:
-        skald::SectionHeader("Entities");
-        if (skald::AccentButton("+ Wave", ImVec2(92.0f, 0.0f))) {
+        skald::SectionHeader("Layers");
+        if (skald::AccentButton("+ Function", ImVec2(112.0f, 0.0f))) {
             create_wave_entity(state);
         }
         ImGui::SameLine();
-        if (skald::GhostButton("Fit Wave", ImVec2(96.0f, 0.0f))) {
+        if (skald::GhostButton("Fit Function", ImVec2(116.0f, 0.0f))) {
             create_interpolated_wave(state);
         }
         ImGui::SameLine();
@@ -5055,10 +5058,10 @@ void draw_entity_toolbox(AppState& state) {
 
     case PropertyTab::Wave:
         if (!selected || selected->type != EntityType::Wave) {
-            skald::KvRowStatus("wave", "select a wave", skald::BadgeTone::Muted);
+            skald::KvRowStatus("function", "select a function", skald::BadgeTone::Muted);
             break;
         }
-        skald::SectionHeader("Wave");
+        skald::SectionHeader("Function");
         sync_entity_name(state);
         if (ImGui::InputText("Name", state.entity_name, sizeof(state.entity_name))) {
             selected->name = state.entity_name;
@@ -5071,8 +5074,8 @@ void draw_entity_toolbox(AppState& state) {
             value_bar_double("secondary amplitude", &selected->wave.secondary_amplitude, 0.01,
                              "%.4f", state.fonts.mono);
         }
-        value_bar_double("wave spatial distance nm", &selected->wave.wavelength_nm, 0.10, "%.4f",
-                         state.fonts.mono);
+        value_bar_double("function spatial distance nm", &selected->wave.wavelength_nm, 0.10,
+                         "%.4f", state.fonts.mono);
         value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f", state.fonts.mono);
         value_bar_double("amplitude offset", &selected->wave.amplitude_offset, 0.01, "%.4f",
                          state.fonts.mono);
@@ -5912,7 +5915,7 @@ float playback_readout_width(const AppState& state) {
     const std::string longest_index = "x " + format_count(max_index);
     const ImVec2 index_size = ImGui::CalcTextSize(longest_index.c_str());
     const ImVec2 hex_size = ImGui::CalcTextSize("hex FF");
-    const ImVec2 scalar_size = ImGui::CalcTextSize("wave -1.000000");
+    const ImVec2 scalar_size = ImGui::CalcTextSize("func -1.000000");
     return std::max(228.0f, std::max({index_size.x, hex_size.x, scalar_size.x}) +
                                 ImGui::GetStyle().FramePadding.x * 2.0f);
 }
@@ -5983,7 +5986,7 @@ void draw_plot(AppState& state) {
                        track_text.c_str());
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "data %s",
                        data_scalar_text.c_str());
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "wave %s",
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "func %s",
                        wave_scalar_text.c_str());
     ImGui::EndGroup();
     ImGui::SameLine(readout_x + readout_width);
@@ -6313,8 +6316,8 @@ void draw_plot(AppState& state) {
                   skald::tokens::ink::primary, "x-line section");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 178.0f, child_pos.y + 8.0f), kDataLineColor,
                   "data");
-    draw->AddText(ImVec2(child_pos.x + child_size.x - 108.0f, child_pos.y + 8.0f), kWaveColors[0],
-                  "waves");
+    draw->AddText(ImVec2(child_pos.x + child_size.x - 128.0f, child_pos.y + 8.0f), kWaveColors[0],
+                  "functions");
     if (state.show_reconstruction_only) {
         draw->AddRectFilled(
             ImVec2(child_pos.x + margin_left, child_pos.y + 28.0f),
@@ -6378,7 +6381,7 @@ const char* file_dialog_popup_label(DialogPurpose purpose) {
     case DialogPurpose::LoadWave:
         return "Open Workspace###thrystr_file_dialog";
     case DialogPurpose::SaveWave:
-        return "Save Wave Data###thrystr_file_dialog";
+        return "Save Function Data###thrystr_file_dialog";
     case DialogPurpose::None:
         break;
     }
