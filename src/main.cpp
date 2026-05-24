@@ -1694,6 +1694,33 @@ std::vector<thrystr::app::Section> data_sections_from_workspace(
     return sections;
 }
 
+void store_multi_track_job_result(AutoFitJob& job,
+                                  thrystr::app::MultiTrackFitResult fit,
+                                  thrystr::app::ValidationReport validation) {
+    std::vector<thrystr::app::Section> sections = data_sections_from_workspace(fit.workspace);
+    const bool used_parity = fit.used_parity;
+    const bool cancelled = fit.cancelled;
+    std::scoped_lock lock(job.result_mutex);
+    job.workspace = std::move(fit.workspace);
+    job.sections = std::move(sections);
+    job.validation = std::move(validation);
+    job.used_parity = used_parity;
+    job.cancelled = cancelled;
+}
+
+void store_single_track_job_result(AutoFitJob& job,
+                                   thrystr::app::ConvergentFitResult fit) {
+    const bool cancelled = fit.cancelled;
+    std::scoped_lock lock(job.result_mutex);
+    job.sections = std::move(fit.sections);
+    job.cancelled = cancelled;
+}
+
+void store_auto_fit_job_error(AutoFitJob& job, std::string message) {
+    std::scoped_lock lock(job.result_mutex);
+    job.error = std::move(message);
+}
+
 thrystr::app::ValidationReport validate_fitted_sections(AppState& state) {
     thrystr::app::ValidationReport report;
     if (!state.analysis || state.fitted_sections.empty()) {
@@ -1829,27 +1856,15 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
                     thrystr::app::validate_tracks(samples,
                                                   fit.workspace,
                                                   track_options.parity_margin);
-                {
-                    std::scoped_lock lock(job.result_mutex);
-                    job.workspace = fit.workspace;
-                    job.sections = data_sections_from_workspace(fit.workspace);
-                    job.validation = validation;
-                    job.used_parity = fit.used_parity;
-                    job.cancelled = fit.cancelled;
-                }
+                store_multi_track_job_result(job, std::move(fit), std::move(validation));
             } else {
                 options.cancel_requested = &job.cancel_requested;
                 const thrystr::app::ConvergentFitResult fit =
                     thrystr::app::fit_convergent_sections(samples, options);
-                {
-                    std::scoped_lock lock(job.result_mutex);
-                    job.sections = fit.sections;
-                    job.cancelled = fit.cancelled;
-                }
+                store_single_track_job_result(job, std::move(fit));
             }
         } catch (const std::exception& error) {
-            std::scoped_lock lock(job.result_mutex);
-            job.error = error.what();
+            store_auto_fit_job_error(job, error.what());
         }
         job.done.store(true);
     });
