@@ -24,6 +24,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -46,6 +47,12 @@ constexpr int kSplashMinWindowHeight = 460;
 constexpr float kWindowControlButtonSize = 28.0f;
 constexpr float kWindowControlRightMargin = 12.0f;
 constexpr ImVec2 kSettingsDialogSize{420.0f, 320.0f};
+constexpr std::size_t kLazyBlockMinBytes = 1u * 1024u * 1024u;
+constexpr std::size_t kLazyBlockMaxBytes = 10u * 1024u * 1024u;
+constexpr std::size_t kLazyCacheMaxBlocks = 6u;
+constexpr int kDefaultLazyBlockMiB = 4;
+constexpr double kXLinePlaybackPointsPerSecond = 60.0;
+constexpr std::size_t kTickerTargetLabelPixels = 58u;
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
 constexpr int kWaveFitPhaseSteps = 128;
@@ -136,6 +143,14 @@ struct WaveFitResult {
     double mean_error = 0.0;
 };
 
+struct LazyBlock {
+    std::size_t index = 0;
+    std::size_t offset = 0;
+    std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> mapped_bytes;
+    std::uint64_t last_used_frame = 0;
+};
+
 struct Args {
     std::string file;
     std::string screenshot;
@@ -220,6 +235,13 @@ struct AppState {
     float wave_tolerance = static_cast<float>(thrystr::kDefaultWaveTolerance);
     int phase_steps = 720;
     int phase_test_points = 65536;
+    int lazy_block_mib = kDefaultLazyBlockMiB;
+    std::vector<LazyBlock> lazy_blocks;
+    std::uint64_t lazy_frame = 0;
+    std::size_t playhead_index = 0;
+    double playhead_fraction = 0.0;
+    bool xline_playing = false;
+    std::optional<std::size_t> pending_scroll_index;
     skald::FileDialogState file_dialog{};
     std::vector<FileBrowserEntry> file_dialog_rows;
     std::vector<skald::FileDialogEntry> file_dialog_entries;
@@ -815,6 +837,217 @@ void refresh_file_dialog_entries(AppState& state) {
     }
 }
 
+std::size_t lazy_block_bytes(const AppState& state) {
+    const int mib = std::clamp(state.lazy_block_mib, 1, 10);
+    return std::clamp(static_cast<std::size_t>(mib) * 1024u * 1024u,
+                      kLazyBlockMinBytes,
+                      kLazyBlockMaxBytes);
+}
+
+std::size_t source_sample_count(const AppState& state) {
+    if (!state.analysis) {
+        return 0u;
+    }
+    if (state.analysis->source_size > 0) {
+        return static_cast<std::size_t>(std::min<std::uintmax_t>(
+            state.analysis->source_size,
+            static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())));
+    }
+    return state.analysis->scalars.size();
+}
+
+void clear_lazy_cache(AppState& state) {
+    state.lazy_blocks.clear();
+    state.lazy_frame = 0;
+}
+
+std::vector<std::uint8_t> read_file_slice(const std::filesystem::path& path,
+                                          std::size_t offset,
+                                          std::size_t length) {
+    std::vector<std::uint8_t> bytes(length);
+    if (length == 0u) {
+        return bytes;
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("could not open file: " + path.string());
+    }
+    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!input) {
+        throw std::runtime_error("could not seek file: " + path.string());
+    }
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    const std::streamsize read_count = input.gcount();
+    if (read_count < 0) {
+        throw std::runtime_error("could not read file: " + path.string());
+    }
+    bytes.resize(static_cast<std::size_t>(read_count));
+    return bytes;
+}
+
+LazyBlock* find_lazy_block(AppState& state, std::size_t block_index) {
+    for (LazyBlock& block : state.lazy_blocks) {
+        if (block.index == block_index) {
+            block.last_used_frame = state.lazy_frame;
+            return &block;
+        }
+    }
+    return nullptr;
+}
+
+const LazyBlock* find_lazy_block(const AppState& state, std::size_t block_index) {
+    for (const LazyBlock& block : state.lazy_blocks) {
+        if (block.index == block_index) {
+            return &block;
+        }
+    }
+    return nullptr;
+}
+
+void trim_lazy_cache(AppState& state) {
+    while (state.lazy_blocks.size() > kLazyCacheMaxBlocks) {
+        const auto oldest = std::min_element(
+            state.lazy_blocks.begin(),
+            state.lazy_blocks.end(),
+            [](const LazyBlock& left, const LazyBlock& right) {
+                return left.last_used_frame < right.last_used_frame;
+            });
+        if (oldest == state.lazy_blocks.end()) {
+            return;
+        }
+        state.lazy_blocks.erase(oldest);
+    }
+}
+
+void load_lazy_block(AppState& state, std::size_t block_index) {
+    if (!state.analysis || find_lazy_block(state, block_index)) {
+        return;
+    }
+
+    const std::size_t count = source_sample_count(state);
+    const std::size_t block_size = lazy_block_bytes(state);
+    const std::size_t offset = block_index * block_size;
+    if (offset >= count) {
+        return;
+    }
+    const std::size_t length = std::min(block_size, count - offset);
+
+    LazyBlock block;
+    block.index = block_index;
+    block.offset = offset;
+    block.bytes = read_file_slice(state.analysis->source_path, offset, length);
+    block.mapped_bytes = thrystr::map_bytes_to_wrapped(block.bytes, state.mappers);
+    block.last_used_frame = state.lazy_frame;
+    state.lazy_blocks.push_back(std::move(block));
+    trim_lazy_cache(state);
+}
+
+void seed_lazy_cache_from_analysis(AppState& state) {
+    clear_lazy_cache(state);
+    if (!state.analysis || state.analysis->bytes.empty()) {
+        return;
+    }
+
+    const std::size_t block_size = lazy_block_bytes(state);
+    LazyBlock block;
+    block.index = state.analysis->window.offset / block_size;
+    block.offset = state.analysis->window.offset;
+    block.bytes = state.analysis->bytes;
+    block.mapped_bytes = state.analysis->mapped_bytes;
+    block.last_used_frame = ++state.lazy_frame;
+    state.lazy_blocks.push_back(std::move(block));
+}
+
+void ensure_lazy_blocks(AppState& state, std::size_t first, std::size_t last) {
+    if (!state.analysis) {
+        return;
+    }
+    const std::size_t count = source_sample_count(state);
+    if (count == 0u) {
+        return;
+    }
+
+    first = std::min(first, count - 1u);
+    last = std::min(last, count - 1u);
+    if (last < first) {
+        std::swap(first, last);
+    }
+
+    ++state.lazy_frame;
+    const std::size_t block_size = lazy_block_bytes(state);
+    const std::size_t first_block = first / block_size;
+    const std::size_t last_block = last / block_size;
+    const std::size_t prefetch_first = first_block == 0u ? 0u : first_block - 1u;
+    const std::size_t prefetch_last =
+        std::min((count - 1u) / block_size, last_block + 1u);
+    for (std::size_t block = prefetch_first; block <= prefetch_last; ++block) {
+        load_lazy_block(state, block);
+    }
+}
+
+std::optional<std::uint8_t> raw_byte_at(const AppState& state, std::size_t index) {
+    if (!state.analysis || index >= source_sample_count(state)) {
+        return std::nullopt;
+    }
+
+    const std::size_t block_size = lazy_block_bytes(state);
+    const std::size_t block_index = index / block_size;
+    if (const LazyBlock* block = find_lazy_block(state, block_index)) {
+        if (index >= block->offset) {
+            const std::size_t local = index - block->offset;
+            if (local < block->bytes.size()) {
+                return block->bytes[local];
+            }
+        }
+    }
+
+    if (index >= state.analysis->window.offset) {
+        const std::size_t local = index - state.analysis->window.offset;
+        if (local < state.analysis->bytes.size()) {
+            return state.analysis->bytes[local];
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<float> scalar_at(const AppState& state, std::size_t index) {
+    if (!state.analysis || index >= source_sample_count(state)) {
+        return std::nullopt;
+    }
+
+    const std::size_t block_size = lazy_block_bytes(state);
+    const std::size_t block_index = index / block_size;
+    if (const LazyBlock* block = find_lazy_block(state, block_index)) {
+        if (index >= block->offset) {
+            const std::size_t local = index - block->offset;
+            if (local < block->mapped_bytes.size()) {
+                return thrystr::byte_to_scalar(block->mapped_bytes[local]);
+            }
+        }
+    }
+
+    if (index >= state.analysis->window.offset) {
+        const std::size_t local = index - state.analysis->window.offset;
+        if (local < state.analysis->scalars.size()) {
+            return state.analysis->scalars[local];
+        }
+    }
+    return std::nullopt;
+}
+
+std::uint8_t byte_from_scalar(float scalar) {
+    const double scaled = (static_cast<double>(scalar) + 1.0) * 128.0;
+    return static_cast<std::uint8_t>(
+        std::clamp(std::llround(scaled), 0ll, 255ll));
+}
+
+std::string hex_byte_text(std::uint8_t byte) {
+    char buffer[8] = {};
+    std::snprintf(buffer, sizeof(buffer), "%02X", static_cast<unsigned>(byte));
+    return buffer;
+}
+
 template <typename T>
 void write_binary(std::ostream& output, const T& value) {
     output.write(reinterpret_cast<const char*>(&value), sizeof(T));
@@ -918,7 +1151,7 @@ double data_spatial_period_nm(const AppState& state) {
 }
 
 std::size_t scalar_count(const AppState& state) {
-    return state.analysis ? state.analysis->scalars.size() : 0u;
+    return source_sample_count(state);
 }
 
 std::size_t clamp_index(double value, std::size_t count) {
@@ -952,16 +1185,17 @@ std::pair<std::size_t, std::size_t> normalized_selection(const AppState& state) 
 }
 
 std::pair<std::size_t, std::size_t> analysis_selection_bounds(const AppState& state) {
-    if (!state.analysis || state.analysis->scalars.empty()) {
+    const std::size_t count = source_sample_count(state);
+    if (!state.analysis || count == 0u) {
         return {0u, 0u};
     }
     if (!state.segment.active) {
-        return {0u, state.analysis->scalars.size() - 1u};
+        return {0u, count - 1u};
     }
     const auto [first, last] = normalized_selection(state);
     return {
-        std::min(first, state.analysis->scalars.size() - 1u),
-        std::min(last, state.analysis->scalars.size() - 1u),
+        std::min(first, count - 1u),
+        std::min(last, count - 1u),
     };
 }
 
@@ -1037,13 +1271,14 @@ Entity& create_wave_entity(AppState& state, std::string name = {}) {
 }
 
 void create_section(AppState& state) {
-    if (!state.analysis || state.analysis->scalars.empty()) {
+    const std::size_t count = source_sample_count(state);
+    if (!state.analysis || count == 0u) {
         state.status = "Load source data before creating a section";
         return;
     }
     state.segment.active = true;
     state.segment.selection_start = 0;
-    state.segment.selection_end = state.analysis->scalars.size() - 1u;
+    state.segment.selection_end = count - 1u;
     state.selection_drag_handle = 0;
     state.status = "Created x-line section";
 }
@@ -1071,7 +1306,8 @@ WaveFitResult score_wave_on_range(const AppState& state,
     WaveFitResult score;
     score.wavelength_nm = wave.wavelength_nm;
     score.phase_nm = wave.phase_nm;
-    if (!state.analysis || state.analysis->scalars.empty() || last < first) {
+    const std::size_t count = source_sample_count(state);
+    if (!state.analysis || count == 0u || last < first) {
         return score;
     }
 
@@ -1080,11 +1316,14 @@ WaveFitResult score_wave_on_range(const AppState& state,
     const std::size_t stride = fit_sample_stride(first, last);
     double error = 0.0;
     // Intersections only count at discrete data samples; drawn data lines are visual guides.
-    for (std::size_t index = first; index <= last && index < state.analysis->scalars.size();
-         index += stride) {
+    for (std::size_t index = first; index <= last && index < count; index += stride) {
+        const std::optional<float> scalar = scalar_at(state, index);
+        if (!scalar) {
+            continue;
+        }
         const double x_nm = static_cast<double>(index) * period;
         const double sample_error =
-            std::abs(wave_value_at_nm(wave, x_nm) - state.analysis->scalars[index]);
+            std::abs(wave_value_at_nm(wave, x_nm) - static_cast<double>(*scalar));
         if (sample_error <= tolerance) {
             ++score.hits;
         }
@@ -1109,7 +1348,7 @@ double log_lerp(double low, double high, double t) {
 }
 
 WaveFitResult fit_wave_to_selection(const AppState& state, const WaveEntity& base_wave) {
-    if (!state.analysis || state.analysis->scalars.size() < 2) {
+    if (!state.analysis || source_sample_count(state) < 2) {
         return {64.0, 0.0};
     }
 
@@ -1151,7 +1390,7 @@ WaveFitResult fit_wave_to_selection(const AppState& state, const WaveEntity& bas
 
 void rebuild_wavelength_modifiers(const AppState& state, WaveEntity& wave) {
     wave.wavelength_modifiers.clear();
-    if (!state.analysis || state.analysis->scalars.size() < 2) {
+    if (!state.analysis || source_sample_count(state) < 2) {
         return;
     }
 
@@ -1219,6 +1458,63 @@ bool should_defer_phase_fit_on_load(const std::filesystem::path& path) {
     std::error_code error;
     const std::uintmax_t file_size = std::filesystem::file_size(path, error);
     return !error && file_size >= kLargeSourcePhaseFitDeferBytes;
+}
+
+thrystr::Analysis load_lazy_analysis_window(const std::filesystem::path& path,
+                                            std::size_t block_bytes,
+                                            float max_slope,
+                                            double wave_scale,
+                                            double wave_tolerance,
+                                            int phase_steps,
+                                            std::size_t max_phase_test_points,
+                                            std::span<const thrystr::ValueMapper> mappers) {
+    std::error_code error;
+    const std::uintmax_t file_size = std::filesystem::file_size(path, error);
+    if (error) {
+        throw std::runtime_error("could not determine file size: " + path.string());
+    }
+    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error("file too large for this build: " + path.string());
+    }
+
+    thrystr::Analysis analysis;
+    analysis.source_path = path;
+    analysis.source_size = file_size;
+    analysis.mappers.assign(mappers.begin(), mappers.end());
+    if (file_size == 0u) {
+        return analysis;
+    }
+
+    const std::size_t source_size = static_cast<std::size_t>(file_size);
+    const std::size_t length = std::min(block_bytes, source_size);
+    analysis.bytes = read_file_slice(path, 0u, length);
+    analysis.mapped_bytes = thrystr::map_bytes_to_wrapped(analysis.bytes, mappers);
+    analysis.scalars = thrystr::map_bytes_to_scalars(analysis.mapped_bytes);
+    analysis.window = thrystr::find_highest_entropy_window(
+        analysis.mapped_bytes,
+        analysis.mapped_bytes.size());
+    analysis.window.offset = 0u;
+    analysis.window.length = analysis.bytes.size();
+    analysis.window_count = source_size >= analysis.window.length
+        ? source_size - analysis.window.length + 1u
+        : 0u;
+    analysis.max_delta_sample_index = analysis.window.delta_index;
+    analysis.max_abs_scalar_delta = thrystr::max_abs_scalar_delta(analysis.scalars);
+    analysis.x_scale = thrystr::compute_x_scale(analysis.scalars, max_slope);
+    analysis.wave_scale = wave_scale;
+    analysis.sine = thrystr::fit_wave_phase(analysis.scalars,
+                                            false,
+                                            wave_scale,
+                                            wave_tolerance,
+                                            phase_steps,
+                                            max_phase_test_points);
+    analysis.cosine = thrystr::fit_wave_phase(analysis.scalars,
+                                              true,
+                                              wave_scale,
+                                              wave_tolerance,
+                                              phase_steps,
+                                              max_phase_test_points);
+    return analysis;
 }
 
 void fit_wave_phases(AppState& state) {
@@ -1439,18 +1735,21 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
 void load_path(AppState& state) {
     try {
         ensure_workspace(state);
-        state.status = "Analyzing";
+        state.status = "Loading";
         const std::filesystem::path source_path(state.path);
         const bool phase_fit_deferred = should_defer_phase_fit_on_load(source_path);
-        state.analysis = thrystr::analyze_file(
+        state.lazy_block_mib = std::clamp(state.lazy_block_mib, 1, 10);
+        const std::size_t block_bytes = lazy_block_bytes(state);
+        state.analysis = load_lazy_analysis_window(
             source_path,
-            thrystr::kDefaultWindowBytes,
+            block_bytes,
             state.max_slope,
             static_cast<double>(state.wave_scale),
             static_cast<double>(state.wave_tolerance),
             state.phase_steps,
             phase_fit_deferred ? 0u : static_cast<std::size_t>(state.phase_test_points),
             state.mappers);
+        seed_lazy_cache_from_analysis(state);
 
         const auto& analysis = *state.analysis;
         Entity& data = ensure_data_entity(state);
@@ -1458,12 +1757,21 @@ void load_path(AppState& state) {
         if (state.selected_entity_id == 0 || !find_entity(state, state.selected_entity_id)) {
             select_entity(state, data.id);
         }
-        if (!state.segment.active && !analysis.scalars.empty()) {
-            state.segment.selection_start = 0;
-            state.segment.selection_end = analysis.scalars.size() - 1u;
+        const std::size_t count = source_sample_count(state);
+        state.playhead_index = analysis.window.offset;
+        state.playhead_fraction = 0.0;
+        state.xline_playing = false;
+        state.pending_scroll_index = state.playhead_index;
+        if (!state.segment.active && count > 0u) {
+            state.segment.selection_start = analysis.window.offset;
+            state.segment.selection_end =
+                std::min(count - 1u, analysis.window.offset + analysis.window.length - 1u);
+        } else {
+            clamp_segment(state);
         }
         state.status = "Loaded " + analysis.source_path.filename().string() +
-                       " / sample " + format_bytes(analysis.window.length);
+                       " / lazy " + format_bytes(block_bytes) +
+                       " / source " + format_bytes(analysis.source_size);
         if (phase_fit_deferred) {
             state.status += " / phase fit deferred";
         }
@@ -1988,7 +2296,7 @@ void draw_inspector_overlay(AppState& state) {
         skald::KvRow("length", "%s", format_bytes(a.window.length).c_str());
         skald::KvRow("max delta", "%u", static_cast<unsigned>(a.window.max_delta));
         skald::KvRow("x scale", "%.3f", static_cast<double>(a.x_scale));
-        skald::KvRow("sample points", "%s", format_count(a.scalars.size()).c_str());
+        skald::KvRow("points", "%s", format_count(source_sample_count(state)).c_str());
         skald::KvRow("mappers", "%s", format_count(a.mappers.size()).c_str());
     } else {
         skald::KvRowStatus("state", "empty", skald::BadgeTone::Muted);
@@ -2172,8 +2480,11 @@ void draw_entity_toolbox(AppState& state) {
         skald::SectionHeader("Data");
         if (state.analysis) {
             const thrystr::Analysis& a = *state.analysis;
-            skald::KvRow("points", "%s", format_count(a.scalars.size()).c_str());
-            skald::KvRow("sample", "%s", format_bytes(a.window.length).c_str());
+            skald::KvRow("points", "%s", format_count(source_sample_count(state)).c_str());
+            skald::KvRow("loaded blocks", "%s",
+                         format_count(state.lazy_blocks.size()).c_str());
+            skald::KvRow("block size", "%s", format_bytes(lazy_block_bytes(state)).c_str());
+            skald::KvRow("source", "%s", format_bytes(a.source_size).c_str());
         } else {
             skald::KvRowStatus("source", "none", skald::BadgeTone::Muted);
         }
@@ -2186,7 +2497,7 @@ void draw_entity_toolbox(AppState& state) {
 
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("X-Line Section");
-        if (state.analysis && !state.analysis->scalars.empty()) {
+        if (state.analysis && source_sample_count(state) > 0u) {
             if (!state.segment.active) {
                 if (skald::AccentButton("Create Section", ImVec2(132.0f, 0.0f))) {
                     create_section(state);
@@ -2208,7 +2519,7 @@ void draw_entity_toolbox(AppState& state) {
                                             "%.0f",
                                             state.fonts.mono);
                 if (changed) {
-                    const std::size_t count = state.analysis->scalars.size();
+                    const std::size_t count = source_sample_count(state);
                     state.segment.selection_start = clamp_index(start_index, count);
                     state.segment.selection_end = clamp_index(end_index, count);
                     clamp_segment(state);
@@ -2229,7 +2540,7 @@ void draw_entity_toolbox(AppState& state) {
                                                "%.3f",
                                                state.fonts.mono);
                 if (nm_changed) {
-                    const std::size_t count = state.analysis->scalars.size();
+                    const std::size_t count = source_sample_count(state);
                     state.segment.selection_start = clamp_index(start_nm / period, count);
                     state.segment.selection_end = clamp_index(end_nm / period, count);
                     clamp_segment(state);
@@ -2267,6 +2578,7 @@ void draw_entity_toolbox(AppState& state) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("Load Params");
         bool params_changed = false;
+        bool lazy_block_changed = false;
         double max_slope = static_cast<double>(state.max_slope);
         double wave_tolerance = static_cast<double>(state.wave_tolerance);
         params_changed |= value_bar_double("max slope",
@@ -2284,8 +2596,16 @@ void draw_entity_toolbox(AppState& state) {
                                         &state.phase_test_points,
                                         512.0,
                                         state.fonts.mono);
+        lazy_block_changed |= value_bar_int("lazy block MiB",
+                                            &state.lazy_block_mib,
+                                            0.05,
+                                            state.fonts.mono);
         state.max_slope = static_cast<float>(max_slope);
         state.wave_tolerance = static_cast<float>(wave_tolerance);
+        if (lazy_block_changed) {
+            state.lazy_block_mib = std::clamp(state.lazy_block_mib, 1, 10);
+            reload_if_file_selected(state);
+        }
         if (params_changed) {
             refresh_analysis_params(state);
         }
@@ -2349,7 +2669,7 @@ float plot_x_step(const AppState& state) {
 }
 
 void draw_data_point_markers(ImDrawList* draw,
-                             const thrystr::Analysis& analysis,
+                             const AppState& state,
                              std::size_t first,
                              std::size_t last,
                              float plot_left,
@@ -2359,15 +2679,19 @@ void draw_data_point_markers(ImDrawList* draw,
                              float y_zoom,
                              const ImVec2& clip_min,
                              const ImVec2& clip_max) {
-    if (!draw || analysis.scalars.empty() || last < first) {
+    const std::size_t count = source_sample_count(state);
+    if (!draw || count == 0u || last < first) {
         return;
     }
 
-    const std::size_t count = analysis.scalars.size();
     if (x_step >= 3.0f) {
         for (std::size_t i = first; i <= last && i < count; ++i) {
+            const std::optional<float> scalar = scalar_at(state, i);
+            if (!scalar) {
+                continue;
+            }
             const ImVec2 point(plot_left + static_cast<float>(i) * x_step,
-                               y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom));
+                               y_for_value(*scalar, plot_top, plot_bottom, y_zoom));
             draw->AddCircleFilled(point, 2.2f, kDataPointHi);
         }
         return;
@@ -2379,6 +2703,10 @@ void draw_data_point_markers(ImDrawList* draw,
     std::vector<float> max_y(static_cast<std::size_t>(column_count), -FLT_MAX);
 
     for (std::size_t i = first; i <= last && i < count; ++i) {
+        const std::optional<float> scalar = scalar_at(state, i);
+        if (!scalar) {
+            continue;
+        }
         const float x = plot_left + static_cast<float>(i) * x_step;
         if (x < clip_min.x || x > clip_max.x) {
             continue;
@@ -2386,7 +2714,7 @@ void draw_data_point_markers(ImDrawList* draw,
         const int column = std::clamp(static_cast<int>(std::floor(x - clip_min.x)),
                                       0,
                                       column_count - 1);
-        const float y = y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom);
+        const float y = y_for_value(*scalar, plot_top, plot_bottom, y_zoom);
         min_y[static_cast<std::size_t>(column)] =
             std::min(min_y[static_cast<std::size_t>(column)], y);
         max_y[static_cast<std::size_t>(column)] =
@@ -2412,6 +2740,107 @@ void draw_data_point_markers(ImDrawList* draw,
     }
 }
 
+void update_xline_playback(AppState& state) {
+    const std::size_t count = source_sample_count(state);
+    if (!state.xline_playing || count == 0u) {
+        return;
+    }
+
+    state.playhead_fraction +=
+        ImGui::GetIO().DeltaTime * kXLinePlaybackPointsPerSecond;
+    const auto step_count = static_cast<std::size_t>(state.playhead_fraction);
+    if (step_count == 0u) {
+        return;
+    }
+    state.playhead_fraction -= static_cast<double>(step_count);
+    state.playhead_index = std::min(count - 1u, state.playhead_index + step_count);
+    state.pending_scroll_index = state.playhead_index;
+    if (state.playhead_index + 1u >= count) {
+        state.xline_playing = false;
+        state.playhead_fraction = 0.0;
+    }
+}
+
+std::optional<std::uint8_t> ticker_byte_at(const AppState& state, std::size_t index) {
+    if (const std::optional<std::uint8_t> byte = raw_byte_at(state, index)) {
+        return byte;
+    }
+    if (const std::optional<float> scalar = scalar_at(state, index)) {
+        return byte_from_scalar(*scalar);
+    }
+    return std::nullopt;
+}
+
+void draw_data_ticker(const AppState& state,
+                      ImDrawList* draw,
+                      std::size_t first,
+                      std::size_t last,
+                      float plot_left,
+                      float plot_bottom,
+                      float x_step,
+                      const ImVec2& clip_min,
+                      const ImVec2& clip_max) {
+    if (!draw || source_sample_count(state) == 0u || last < first) {
+        return;
+    }
+
+    const float ticker_top = plot_bottom + 22.0f;
+    const float ticker_bottom = clip_max.y - 8.0f;
+    if (ticker_bottom <= ticker_top) {
+        return;
+    }
+
+    draw->AddRectFilled(ImVec2(clip_min.x, ticker_top - 4.0f),
+                        ImVec2(clip_max.x, ticker_bottom),
+                        skald::tokens::surface::panel_alt);
+    draw->AddLine(ImVec2(clip_min.x, ticker_top - 4.0f),
+                  ImVec2(clip_max.x, ticker_top - 4.0f),
+                  skald::tokens::border::separator,
+                  1.0f);
+
+    const std::size_t stride = std::max<std::size_t>(
+        1u,
+        static_cast<std::size_t>(std::ceil(
+            static_cast<double>(kTickerTargetLabelPixels) /
+            std::max(1.0f, x_step))));
+    const std::size_t start = first - (first % stride);
+    for (std::size_t i = start; i <= last && i < source_sample_count(state); i += stride) {
+        if (i == state.playhead_index) {
+            continue;
+        }
+        const std::optional<std::uint8_t> byte = ticker_byte_at(state, i);
+        if (!byte) {
+            continue;
+        }
+        const std::string label = hex_byte_text(*byte);
+        const float x = plot_left + static_cast<float>(i) * x_step;
+        const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
+        draw->AddText(ImVec2(x - text_size.x * 0.5f, ticker_top),
+                      skald::tokens::ink::muted,
+                      label.c_str());
+    }
+
+    if (state.playhead_index < first || state.playhead_index > last) {
+        return;
+    }
+    const std::optional<std::uint8_t> current_byte =
+        ticker_byte_at(state, state.playhead_index);
+    if (!current_byte) {
+        return;
+    }
+
+    const std::string label = hex_byte_text(*current_byte);
+    const float x = plot_left + static_cast<float>(state.playhead_index) * x_step;
+    const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
+    const ImVec2 text_pos(x - text_size.x * 0.5f, ticker_top);
+    draw->AddRectFilled(ImVec2(text_pos.x - 6.0f, text_pos.y - 3.0f),
+                        ImVec2(text_pos.x + text_size.x + 6.0f,
+                               text_pos.y + text_size.y + 3.0f),
+                        skald::tokens::surface::control_hi,
+                        skald::tokens::radii::ctrl);
+    draw->AddText(text_pos, skald::tokens::ink::primary, label.c_str());
+}
+
 void draw_plot(AppState& state) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     const float toolbox_width = state.workspace_open ? std::min(kToolboxWidth, viewport.x * 0.45f) : 0.0f;
@@ -2425,7 +2854,7 @@ void draw_plot(AppState& state) {
                  ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    if (!state.analysis || state.analysis->scalars.empty()) {
+    if (!state.analysis || source_sample_count(state) == 0u) {
         const ImVec2 available = ImGui::GetContentRegionAvail();
         ImGui::InvisibleButton("##empty_plot", available);
         auto* draw = ImGui::GetWindowDrawList();
@@ -2440,24 +2869,46 @@ void draw_plot(AppState& state) {
         return;
     }
 
+    update_xline_playback(state);
     const thrystr::Analysis& analysis = *state.analysis;
-    const std::size_t count = analysis.scalars.size();
+    const std::size_t count = source_sample_count(state);
     state.segment.selection_start = std::min(state.segment.selection_start, count - 1u);
     state.segment.selection_end = std::min(state.segment.selection_end, count - 1u);
+    state.playhead_index = std::min(state.playhead_index, count - 1u);
     const float x_step = plot_x_step(state);
     const float y_zoom = std::max(0.01f, std::abs(state.zoom_y));
     const double period_nm = data_spatial_period_nm(state);
+    if (skald::IconButton(state.xline_playing ? skald::icons::kPause : skald::icons::kPlay,
+                          state.xline_playing ? "Pause x-line" : "Play x-line")) {
+        state.xline_playing = !state.xline_playing;
+        state.playhead_fraction = 0.0;
+    }
+    ImGui::SameLine();
+    const std::optional<std::uint8_t> playhead_byte = raw_byte_at(state, state.playhead_index);
+    const std::string playhead_hex = playhead_byte ? hex_byte_text(*playhead_byte) : "--";
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
+                       "x %s / hex %s / 60 pps",
+                       format_count(state.playhead_index).c_str(),
+                       playhead_hex.c_str());
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const float plot_height = std::max(360.0f, available.y - 8.0f);
     const float margin_left = 58.0f;
     const float margin_right = 30.0f;
     const float margin_top = 28.0f;
-    const float margin_bottom = 44.0f;
+    const float margin_bottom = 84.0f;
     const float logical_width = std::max(available.x,
         margin_left + margin_right + static_cast<float>(count - 1) * x_step);
 
     ImGui::BeginChild("##plot_scroll", ImVec2(0.0f, 0.0f), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
+    if (state.pending_scroll_index) {
+        const float target_scroll =
+            static_cast<float>(*state.pending_scroll_index) * x_step +
+            margin_left -
+            ImGui::GetWindowWidth() * 0.5f;
+        ImGui::SetScrollX(std::max(0.0f, target_scroll));
+        state.pending_scroll_index.reset();
+    }
     ImGui::InvisibleButton("##plot_canvas", ImVec2(logical_width, plot_height));
     const bool plot_hovered = ImGui::IsItemHovered();
 
@@ -2504,6 +2955,8 @@ void draw_plot(AppState& state) {
         static_cast<std::size_t>(std::floor(std::max(0.0f, index_left))));
     const std::size_t last = std::min(count - 1,
         static_cast<std::size_t>(std::ceil(std::max(index_left, index_right))) + 2u);
+    ensure_lazy_blocks(state, first, last);
+    ensure_lazy_blocks(state, state.playhead_index, state.playhead_index);
 
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(clip_min, clip_max, true);
@@ -2535,7 +2988,7 @@ void draw_plot(AppState& state) {
                       skald::tokens::ink::muted, label);
     }
 
-    const std::size_t delta_index = std::min(analysis.max_delta_sample_index, count - 1);
+    const std::size_t delta_index = std::min(analysis.window.delta_index, count - 1);
     if (delta_index >= first && delta_index <= last) {
         const float x = plot_left + static_cast<float>(delta_index) * x_step;
         draw->AddRectFilled(ImVec2(x - 2.0f, plot_top),
@@ -2607,10 +3060,15 @@ void draw_plot(AppState& state) {
     const bool draw_data = data == nullptr || data->visible;
     if (draw_data && state.show_lines) {
         for (std::size_t i = first; i < last && i + 1 < count; ++i) {
+            const std::optional<float> scalar_a = scalar_at(state, i);
+            const std::optional<float> scalar_b = scalar_at(state, i + 1u);
+            if (!scalar_a || !scalar_b) {
+                continue;
+            }
             const ImVec2 a(plot_left + static_cast<float>(i) * x_step,
-                           y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom));
+                           y_for_value(*scalar_a, plot_top, plot_bottom, y_zoom));
             const ImVec2 b(plot_left + static_cast<float>(i + 1) * x_step,
-                           y_for_value(analysis.scalars[i + 1], plot_top, plot_bottom, y_zoom));
+                           y_for_value(*scalar_b, plot_top, plot_bottom, y_zoom));
             draw->AddLine(a, b, kDataLineColor, 1.2f);
         }
     }
@@ -2645,7 +3103,7 @@ void draw_plot(AppState& state) {
 
     if (draw_data && state.show_points) {
         draw_data_point_markers(draw,
-                                analysis,
+                                state,
                                 first,
                                 last,
                                 plot_left,
@@ -2665,6 +3123,29 @@ void draw_plot(AppState& state) {
                   kDataLineColor, "data");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 108.0f, child_pos.y + 8.0f),
                   kWaveColors[0], "waves");
+
+    if (state.playhead_index >= first && state.playhead_index <= last) {
+        const float playhead_x = plot_left + static_cast<float>(state.playhead_index) * x_step;
+        draw->AddLine(ImVec2(playhead_x, plot_top),
+                      ImVec2(playhead_x, clip_max.y - 8.0f),
+                      kSelectionHandle,
+                      2.0f);
+        if (const std::optional<float> scalar = scalar_at(state, state.playhead_index)) {
+            draw->AddCircleFilled(ImVec2(playhead_x,
+                                         y_for_value(*scalar, plot_top, plot_bottom, y_zoom)),
+                                  4.0f,
+                                  kSelectionHandle);
+        }
+    }
+    draw_data_ticker(state,
+                     draw,
+                     first,
+                     last,
+                     plot_left,
+                     plot_bottom,
+                     x_step,
+                     clip_min,
+                     clip_max);
 
     draw->PopClipRect();
     ImGui::EndChild();
