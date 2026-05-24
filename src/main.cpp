@@ -235,6 +235,7 @@ struct AppState {
     bool segment_selection_mode = false;
     float zoom_x = 1.0f;
     float zoom_y = 1.0f;
+    float timeline_scroll_x = 0.0f;
     float max_slope = thrystr::kDefaultMaxSlope;
     float wave_scale = static_cast<float>(thrystr::kDefaultWaveScale);
     float wave_tolerance = static_cast<float>(thrystr::kDefaultWaveTolerance);
@@ -1239,6 +1240,7 @@ void open_empty_workspace(AppState& state) {
     state.entity_name_id = 0;
     state.wheel_scroll_mode = true;
     state.segment_selection_mode = false;
+    state.timeline_scroll_x = 0.0f;
     state.xline_playing = false;
     state.playhead_dragging = false;
     state.playhead_index = 0;
@@ -1776,6 +1778,7 @@ void load_path(AppState& state) {
         const std::size_t count = source_sample_count(state);
         state.playhead_index = analysis.window.offset;
         state.playhead_fraction = 0.0;
+        state.timeline_scroll_x = 0.0f;
         state.xline_playing = false;
         state.playhead_dragging = false;
         state.pending_scroll_index = state.playhead_index;
@@ -3074,60 +3077,80 @@ void draw_plot(AppState& state) {
 
     ImGui::BeginChild("##plot_scroll", ImVec2(0.0f, 0.0f), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
-    const bool child_hovered =
-        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 child_pos = ImGui::GetWindowPos();
+    const ImVec2 child_size = ImGui::GetWindowSize();
+    const bool child_mouse_inside =
+        io.MousePos.x >= child_pos.x &&
+        io.MousePos.x <= child_pos.x + child_size.x &&
+        io.MousePos.y >= child_pos.y &&
+        io.MousePos.y <= child_pos.y + child_size.y;
+    const float child_width = ImGui::GetWindowWidth();
+    const float max_scroll_x = std::max(0.0f, logical_width - child_width);
+    const float native_scroll_x = ImGui::GetScrollX();
+    state.timeline_scroll_x = std::clamp(state.timeline_scroll_x, 0.0f, max_scroll_x);
+    if (!state.pending_scroll_index &&
+        !state.xline_playing &&
+        io.MouseWheel == 0.0f &&
+        std::abs(native_scroll_x - state.timeline_scroll_x) > 0.5f) {
+        state.timeline_scroll_x = std::clamp(native_scroll_x, 0.0f, max_scroll_x);
+    }
     if (state.pending_scroll_index) {
         const float target_scroll =
             static_cast<float>(*state.pending_scroll_index) * x_step +
             margin_left -
-            ImGui::GetWindowWidth() * 0.5f;
-        ImGui::SetScrollX(std::max(0.0f, target_scroll));
+            child_width * 0.5f;
+        state.timeline_scroll_x = std::clamp(target_scroll, 0.0f, max_scroll_x);
         state.pending_scroll_index.reset();
     }
     if (state.xline_playing) {
-        const float child_width = ImGui::GetWindowWidth();
         const float playhead_local =
             margin_left + static_cast<float>(state.playhead_index) * x_step;
-        const float visible_midpoint = ImGui::GetScrollX() + child_width * 0.5f;
+        const float visible_midpoint = state.timeline_scroll_x + child_width * 0.5f;
         if (playhead_local >= visible_midpoint) {
-            ImGui::SetScrollX(std::max(0.0f, playhead_local - child_width * 0.5f));
+            state.timeline_scroll_x =
+                std::clamp(playhead_local - child_width * 0.5f, 0.0f, max_scroll_x);
         }
     }
-    if (child_hovered &&
+    if (child_mouse_inside &&
         state.wheel_scroll_mode &&
-        ImGui::GetIO().MouseWheel != 0.0f &&
-        !ImGui::GetIO().KeyCtrl &&
-        !ImGui::GetIO().KeySuper) {
+        io.MouseWheel != 0.0f &&
+        !io.KeyCtrl &&
+        !io.KeySuper) {
         const float scroll_step =
-            std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
-        ImGui::SetScrollX(std::max(0.0f,
-                                   ImGui::GetScrollX() -
-                                       ImGui::GetIO().MouseWheel * scroll_step));
+            std::clamp(child_width * 0.18f, 64.0f, 420.0f);
+        state.timeline_scroll_x =
+            std::clamp(state.timeline_scroll_x -
+                           io.MouseWheel * scroll_step,
+                       0.0f,
+                       max_scroll_x);
     }
+    ImGui::SetScrollX(state.timeline_scroll_x);
     ImGui::InvisibleButton("##plot_canvas", ImVec2(logical_width, plot_height));
+    ImGui::SetScrollX(state.timeline_scroll_x);
     const bool plot_hovered = ImGui::IsItemHovered();
 
     const ImVec2 item_min = ImGui::GetItemRectMin();
     const ImVec2 item_max = ImGui::GetItemRectMax();
-    const ImVec2 child_pos = ImGui::GetWindowPos();
-    const ImVec2 child_size = ImGui::GetWindowSize();
     const ImVec2 clip_min(child_pos.x, child_pos.y);
     const ImVec2 clip_max(child_pos.x + child_size.x, child_pos.y + child_size.y);
 
-    const float plot_left = item_min.x + margin_left;
+    const float plot_left = child_pos.x + margin_left - state.timeline_scroll_x;
     const float plot_right = plot_left + static_cast<float>(count - 1) * x_step;
     const float plot_top = item_min.y + margin_top;
     const float plot_bottom = item_max.y - margin_bottom;
-    if (plot_hovered && ImGui::GetIO().MouseWheel != 0.0f) {
-        ImGuiIO& io = ImGui::GetIO();
+    if (plot_hovered && io.MouseWheel != 0.0f) {
         if (io.KeyCtrl || io.KeySuper) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             state.zoom_y = std::max(0.01f, state.zoom_y * factor);
         } else if (io.KeyShift && !state.wheel_scroll_mode) {
             const float scroll_step =
                 std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
-            ImGui::SetScrollX(std::max(0.0f,
-                                       ImGui::GetScrollX() - io.MouseWheel * scroll_step));
+            state.timeline_scroll_x =
+                std::clamp(state.timeline_scroll_x - io.MouseWheel * scroll_step,
+                           0.0f,
+                           max_scroll_x);
+            ImGui::SetScrollX(state.timeline_scroll_x);
         } else if (!state.wheel_scroll_mode) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             const float old_step = x_step;
@@ -3138,11 +3161,19 @@ void draw_plot(AppState& state) {
             state.zoom_x = std::max(0.01f, state.zoom_x * factor);
             const float new_step = plot_x_step(state);
             const float mouse_local_x = io.MousePos.x - child_pos.x;
-            ImGui::SetScrollX(std::max(0.0f, mouse_index * new_step + margin_left - mouse_local_x));
+            const float new_logical_width = std::max(
+                available.x,
+                margin_left + margin_right + static_cast<float>(count - 1) * new_step);
+            const float new_max_scroll_x = std::max(0.0f, new_logical_width - child_width);
+            state.timeline_scroll_x =
+                std::clamp(mouse_index * new_step + margin_left - mouse_local_x,
+                           0.0f,
+                           new_max_scroll_x);
+            ImGui::SetScrollX(state.timeline_scroll_x);
         }
     }
-    const float visible_left_local = ImGui::GetScrollX();
-    const float visible_width = ImGui::GetWindowWidth();
+    const float visible_left_local = state.timeline_scroll_x;
+    const float visible_width = child_width;
     const float index_left = std::max(0.0f, (visible_left_local - margin_left) / x_step);
     const float index_right = std::min(static_cast<float>(count - 1),
         (visible_left_local + visible_width - margin_left) / x_step);
