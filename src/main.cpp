@@ -2,6 +2,7 @@
 #include <thrystr/scalar_analysis.hpp>
 #include <thrystr/app/convergent_fit.hpp>
 #include <thrystr/app/fit_validation.hpp>
+#include <thrystr/app/multi_track_fit.hpp>
 #include <thrystr/render_io.hpp>
 
 #include <GLFW/glfw3.h>
@@ -79,10 +80,11 @@ constexpr const char* kSplashHeroPath = THRYSTR_ASSET_DIR "/splash_hero.png";
 constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
-constexpr std::uint32_t kWaveSettingsVersion = 4;
+constexpr std::uint32_t kWaveSettingsVersion = 5;
 constexpr std::uint32_t kWaveSettingsEndianStamp = 0x01020304u;
 constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
 constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
+constexpr std::uint32_t kMaxWaveSettingsMaskBytes = 512u * 1024u * 1024u;
 constexpr std::size_t kAutoFitMaxSamples = 65536u;
 constexpr ImU32 kTransparent = IM_COL32(0, 0, 0, 0);
 
@@ -256,6 +258,9 @@ struct AppState {
     std::vector<thrystr::ValueMapper> mappers;
     std::vector<Entity> entities;
     std::vector<thrystr::app::Section> fitted_sections;
+    thrystr::app::WorkspaceModel fitted_workspace;
+    bool fitted_workspace_valid = false;
+    bool fitted_workspace_used_parity = false;
     thrystr::app::ValidationReport fit_validation;
     AutoFitJob auto_fit_job;
     Segment segment;
@@ -1391,6 +1396,9 @@ void open_empty_workspace(AppState& state) {
     state.analysis.reset();
     state.entities.clear();
     state.fitted_sections.clear();
+    state.fitted_workspace = {};
+    state.fitted_workspace_valid = false;
+    state.fitted_workspace_used_parity = false;
     state.fit_validation = {};
     state.segment = {};
     state.path[0] = '\0';
@@ -1820,6 +1828,17 @@ void finish_auto_fit_if_ready(AppState& state) {
     for (thrystr::app::Section& section : state.fitted_sections) {
         section.start_index += static_cast<std::uint32_t>(job.start_offset);
     }
+    state.fitted_workspace = {};
+    thrystr::app::Track track;
+    track.id = 0u;
+    track.kind = thrystr::app::TrackKind::Data;
+    track.name = "single track";
+    track.sections = state.fitted_sections;
+    state.fitted_workspace.tracks.push_back(std::move(track));
+    state.fitted_workspace.active_track_id = 0u;
+    state.fitted_workspace.parity_track_id = thrystr::app::kNoParityTrack;
+    state.fitted_workspace_valid = true;
+    state.fitted_workspace_used_parity = false;
     state.fit_validation = validate_fitted_sections(state);
     state.show_reconstruction_only = true;
     state.status = std::string(cancelled ? "Auto-fit cancelled: " : "Auto-fit: ") +
@@ -2012,6 +2031,64 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
         write_value(section.mean_residual);
     }
 
+    const thrystr::app::WorkspaceModel* workspace_to_save =
+        state.fitted_workspace_valid ? &state.fitted_workspace : nullptr;
+    thrystr::app::WorkspaceModel fallback_workspace;
+    if (!workspace_to_save && !state.fitted_sections.empty()) {
+        thrystr::app::Track track;
+        track.id = 0u;
+        track.kind = thrystr::app::TrackKind::Data;
+        track.name = "single track";
+        track.sections = state.fitted_sections;
+        fallback_workspace.tracks.push_back(std::move(track));
+        fallback_workspace.active_track_id = 0u;
+        fallback_workspace.parity_track_id = thrystr::app::kNoParityTrack;
+        workspace_to_save = &fallback_workspace;
+    }
+
+    const std::uint8_t track_count = workspace_to_save
+        ? static_cast<std::uint8_t>(
+              std::min(workspace_to_save->tracks.size(), thrystr::app::kMaxTracks))
+        : 0u;
+    write_value(track_count);
+    write_value(workspace_to_save ? workspace_to_save->parity_track_id
+                                  : thrystr::app::kNoParityTrack);
+    if (workspace_to_save) {
+        for (std::size_t track_index = 0; track_index < track_count; ++track_index) {
+            const thrystr::app::Track& track = workspace_to_save->tracks[track_index];
+            write_value(track.id);
+            write_value(static_cast<std::uint8_t>(track.kind));
+            write_value(static_cast<std::uint8_t>(track.visible ? 1u : 0u));
+            write_string_le(output, track.name);
+            if (track.kind == thrystr::app::TrackKind::Data && !track.owned_mask.empty()) {
+                const auto mask_size = static_cast<std::uint32_t>(track.owned_mask.size());
+                write_value(mask_size);
+                output.write(reinterpret_cast<const char*>(track.owned_mask.data()),
+                             static_cast<std::streamsize>(track.owned_mask.size()));
+                if (!output) {
+                    throw std::runtime_error("could not write wave settings mask");
+                }
+            } else {
+                write_value(static_cast<std::uint32_t>(0u));
+            }
+            const auto track_section_count =
+                static_cast<std::uint32_t>(track.sections.size());
+            write_value(track_section_count);
+            for (const thrystr::app::Section& section : track.sections) {
+                write_value(section.start_index);
+                write_value(section.length);
+                write_value(section.section_spacing_nm);
+                write_value(section.wave_wavelength_nm);
+                write_value(section.wave_amplitude);
+                write_value(section.wave_amplitude_offset);
+                write_value(section.wave_phase_nm);
+                write_value(section.fit_tolerance);
+                write_value(section.max_residual);
+                write_value(section.mean_residual);
+            }
+        }
+    }
+
     copy_to_buffer(state.wave_path, output_path.lexically_normal().string());
     state.status = "Saved wave settings: " + output_path.filename().string();
 }
@@ -2031,7 +2108,8 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
 
     const std::uint32_t version = read_binary_le<std::uint32_t>(input);
     const bool portable_payload = version >= 4;
-    if (version != 1 && version != 2 && version != 3 && version != kWaveSettingsVersion) {
+    if (version != 1 && version != 2 && version != 3 &&
+        version != 4 && version != kWaveSettingsVersion) {
         throw std::runtime_error("unsupported wave settings version");
     }
     if (portable_payload) {
@@ -2069,6 +2147,9 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     state.wave_serial = 1;
     state.segment = {};
     state.fitted_sections.clear();
+    state.fitted_workspace = {};
+    state.fitted_workspace_valid = false;
+    state.fitted_workspace_used_parity = false;
     state.fit_validation = {};
 
     const std::uint32_t mapper_count = read_value.template operator()<std::uint32_t>();
@@ -2157,6 +2238,85 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
                 section.mean_residual = read_value.template operator()<double>();
                 state.fitted_sections.push_back(section);
             }
+        }
+        if (version >= 5) {
+            thrystr::app::WorkspaceModel workspace;
+            const std::uint8_t track_count =
+                read_value.template operator()<std::uint8_t>();
+            workspace.parity_track_id =
+                read_value.template operator()<std::uint8_t>();
+            if (track_count > thrystr::app::kMaxTracks) {
+                throw std::runtime_error("wave settings track count too large");
+            }
+            workspace.tracks.reserve(track_count);
+            for (std::uint8_t track_index = 0; track_index < track_count; ++track_index) {
+                thrystr::app::Track track;
+                track.id = read_value.template operator()<std::uint8_t>();
+                track.kind = static_cast<thrystr::app::TrackKind>(
+                    read_value.template operator()<std::uint8_t>());
+                track.visible = read_value.template operator()<std::uint8_t>() != 0u;
+                track.name = read_text();
+                const std::uint32_t mask_size =
+                    read_value.template operator()<std::uint32_t>();
+                if (mask_size > kMaxWaveSettingsMaskBytes) {
+                    throw std::runtime_error("wave settings owned mask too large");
+                }
+                if (mask_size > 0u) {
+                    track.owned_mask.resize(mask_size);
+                    input.read(reinterpret_cast<char*>(track.owned_mask.data()),
+                               static_cast<std::streamsize>(track.owned_mask.size()));
+                    if (!input) {
+                        throw std::runtime_error("could not read wave settings owned mask");
+                    }
+                }
+                const std::uint32_t track_section_count =
+                    read_value.template operator()<std::uint32_t>();
+                if (track_section_count > kMaxWaveSettingsItems) {
+                    throw std::runtime_error("wave settings track section count too large");
+                }
+                track.sections.reserve(track_section_count);
+                for (std::uint32_t section_index = 0;
+                     section_index < track_section_count;
+                     ++section_index) {
+                    thrystr::app::Section section;
+                    section.start_index = read_value.template operator()<std::uint32_t>();
+                    section.length = read_value.template operator()<std::uint32_t>();
+                    section.section_spacing_nm = read_value.template operator()<double>();
+                    section.wave_wavelength_nm = read_value.template operator()<double>();
+                    section.wave_amplitude = read_value.template operator()<double>();
+                    section.wave_amplitude_offset = read_value.template operator()<double>();
+                    section.wave_phase_nm = read_value.template operator()<double>();
+                    section.fit_tolerance = read_value.template operator()<double>();
+                    section.max_residual = read_value.template operator()<double>();
+                    section.mean_residual = read_value.template operator()<double>();
+                    track.sections.push_back(section);
+                }
+                workspace.tracks.push_back(std::move(track));
+            }
+            state.fitted_workspace = std::move(workspace);
+            state.fitted_workspace_valid = !state.fitted_workspace.tracks.empty();
+            state.fitted_workspace_used_parity =
+                state.fitted_workspace.parity_track_id != thrystr::app::kNoParityTrack;
+            if (state.fitted_workspace_valid && state.fitted_sections.empty()) {
+                for (const thrystr::app::Track& track : state.fitted_workspace.tracks) {
+                    if (track.kind == thrystr::app::TrackKind::Data) {
+                        state.fitted_sections = track.sections;
+                        break;
+                    }
+                }
+            }
+        } else if (!state.fitted_sections.empty()) {
+            state.fitted_workspace = {};
+            thrystr::app::Track track;
+            track.id = 0u;
+            track.kind = thrystr::app::TrackKind::Data;
+            track.name = "single track";
+            track.sections = state.fitted_sections;
+            state.fitted_workspace.tracks.push_back(std::move(track));
+            state.fitted_workspace.active_track_id = 0u;
+            state.fitted_workspace.parity_track_id = thrystr::app::kNoParityTrack;
+            state.fitted_workspace_valid = true;
+            state.fitted_workspace_used_parity = false;
         }
         if (!find_entity(state, state.selected_entity_id) && !state.entities.empty()) {
             state.selected_entity_id = state.entities.front().id;
@@ -2831,6 +2991,11 @@ void draw_fit_validation_overlay(AppState& state) {
                        report.pass ? skald::BadgeTone::Success
                                    : skald::BadgeTone::Destructive);
     skald::KvRow("sections", "%s", format_count(state.fitted_sections.size()).c_str());
+    if (state.fitted_workspace_valid) {
+        skald::KvRow("tracks", "%s%s",
+                     format_count(state.fitted_workspace.tracks.size()).c_str(),
+                     state.fitted_workspace_used_parity ? " + parity" : "");
+    }
     skald::KvRow("samples", "%s", format_count(report.checked_samples).c_str());
     skald::KvRow("max residual", "%.8f", report.max_residual);
     skald::KvRow("mean residual", "%.8f", report.mean_residual);
@@ -3088,6 +3253,11 @@ void draw_entity_toolbox(AppState& state) {
                 if (!state.fitted_sections.empty()) {
                     skald::KvRow("fit sections", "%s",
                                  format_count(state.fitted_sections.size()).c_str());
+                    if (state.fitted_workspace_valid) {
+                        skald::KvRow("fit tracks", "%s%s",
+                                     format_count(state.fitted_workspace.tracks.size()).c_str(),
+                                     state.fitted_workspace_used_parity ? " + parity" : "");
+                    }
                     skald::KvRow("fit samples", "%s",
                                  format_count(state.fit_validation.checked_samples).c_str());
                     skald::KvRow("fit residual", "%.6f",
@@ -4165,6 +4335,9 @@ void draw_file_dialog(AppState& state) {
         case DialogPurpose::OpenSource:
             copy_to_buffer(state.path, selected.lexically_normal().string());
             state.fitted_sections.clear();
+            state.fitted_workspace = {};
+            state.fitted_workspace_valid = false;
+            state.fitted_workspace_used_parity = false;
             state.fit_validation = {};
             state.show_reconstruction_only = false;
             load_path(state);
