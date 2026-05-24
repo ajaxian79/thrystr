@@ -55,6 +55,8 @@ constexpr double kDefaultPlaybackPointsPerSecond = 60.0;
 constexpr std::array<double, 4> kPlaybackSpeedPresets = {12.0, 24.0, 30.0, 60.0};
 constexpr float kPlayheadScrubHitPixels = 18.0f;
 constexpr float kTickerCurrentScale = 1.5f;
+constexpr float kPlaybackReadoutWidth = 320.0f;
+constexpr float kPlaybackReadoutHeight = 36.0f;
 constexpr std::size_t kTickerTargetLabelPixels = 58u;
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
@@ -3035,11 +3037,20 @@ void draw_plot(AppState& state) {
     const std::optional<std::uint8_t> playhead_byte =
         ticker_byte_at(state, state.playhead_index);
     const std::string playhead_hex = playhead_byte ? hex_byte_text(*playhead_byte) : "--";
+    const float readout_x = ImGui::GetCursorPosX();
+    ImGui::BeginChild("##playback_readout",
+                      ImVec2(kPlaybackReadoutWidth, kPlaybackReadoutHeight),
+                      false,
+                      ImGuiWindowFlags_NoScrollbar |
+                      ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
-                       "x %s / hex %s",
-                       format_count(state.playhead_index).c_str(),
+                       "x %s",
+                       format_count(state.playhead_index).c_str());
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
+                       "hex %s",
                        playhead_hex.c_str());
-    ImGui::SameLine();
+    ImGui::EndChild();
+    ImGui::SameLine(readout_x + kPlaybackReadoutWidth);
     if (playback_speed_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
                               state.wheel_scroll_mode,
                               102.0f)) {
