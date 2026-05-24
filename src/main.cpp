@@ -1,4 +1,5 @@
 #include <thrystr/scalar_analysis.hpp>
+#include <thrystr/render_io.hpp>
 
 #include <GLFW/glfw3.h>
 #if defined(THRYSTR_HAS_X11)
@@ -12,7 +13,6 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <skald/skald.h>
-#include <stb_image_write.h>
 
 #include <algorithm>
 #include <array>
@@ -21,10 +21,10 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <string>
@@ -34,7 +34,6 @@
 
 namespace {
 
-constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr float kToolboxWidth = 380.0f;
 constexpr float kTopChromeHeight = 44.0f;
 constexpr double kChromeResizeMargin = 8.0;
@@ -44,7 +43,6 @@ constexpr int kSplashWindowWidth = 960;
 constexpr int kSplashWindowHeight = 560;
 constexpr int kSplashMinWindowWidth = 720;
 constexpr int kSplashMinWindowHeight = 460;
-constexpr ImVec2 kFileDialogSize{720.0f, 520.0f};
 constexpr ImVec2 kSettingsDialogSize{420.0f, 320.0f};
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
@@ -52,10 +50,35 @@ constexpr int kWaveFitPhaseSteps = 128;
 constexpr std::size_t kMaxWaveWavelengthModifiers = 16;
 constexpr int kWaveModifierWavelengthSteps = 41;
 constexpr std::uintmax_t kLargeSourcePhaseFitDeferBytes = 128ull * 1024ull * 1024ull;
+constexpr const char* kSplashHeroPath = THRYSTR_ASSET_DIR "/splash_hero.png";
 constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
 constexpr std::uint32_t kWaveSettingsVersion = 2;
+constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
+constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
+constexpr ImU32 kTransparent = IM_COL32(0, 0, 0, 0);
+
+const ImU32 kDataPointHi = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.92f);
+const ImU32 kDataPointMed = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.86f);
+const ImU32 kDataPointLo = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.73f);
+const ImU32 kDataLineColor = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
+const ImU32 kMaxDeltaFill =
+    skald::tokens::with_alpha(skald::tokens::status::destructive, 40.0f / 255.0f);
+const ImU32 kSelectionFill =
+    skald::tokens::with_alpha(skald::tokens::status::info, 32.0f / 255.0f);
+const ImU32 kSelectionEdge =
+    skald::tokens::with_alpha(skald::tokens::status::info, 210.0f / 255.0f);
+const ImU32 kSelectionHandle =
+    skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
+const std::array<ImU32, 6> kWaveColors = {
+    skald::tokens::with_alpha(skald::tokens::accents::gold, 0.86f),
+    skald::tokens::with_alpha(skald::tokens::accents::mint, 0.86f),
+    skald::tokens::with_alpha(skald::tokens::status::destructive, 0.86f),
+    skald::tokens::with_alpha(skald::tokens::accents::violet, 0.86f),
+    skald::tokens::with_alpha(skald::tokens::accents::ember, 0.86f),
+    skald::tokens::with_alpha(skald::tokens::accents::cyan, 0.86f),
+};
 
 enum class DialogPurpose {
     None,
@@ -188,8 +211,6 @@ struct AppState {
     int chrome_start_window_h = 0;
     bool show_points = true;
     bool show_lines = true;
-    bool show_sine = true;
-    bool show_cosine = true;
     float zoom_x = 1.0f;
     float zoom_y = 1.0f;
     float max_slope = thrystr::kDefaultMaxSlope;
@@ -201,9 +222,12 @@ struct AppState {
     std::vector<FileBrowserEntry> file_dialog_rows;
     std::vector<skald::FileDialogEntry> file_dialog_entries;
     int file_dialog_last_row = -1;
+    bool file_dialog_dirty = true;
     DialogPurpose pending_dialog = DialogPurpose::None;
     DialogPurpose active_dialog = DialogPurpose::None;
     skald::Fonts fonts{};
+    GLuint splash_hero_texture = 0;
+    ImVec2 splash_hero_size{};
 };
 
 Args parse_args(int argc, char** argv) {
@@ -818,6 +842,9 @@ void write_string(std::ostream& output, const std::string& value) {
 
 std::string read_string(std::istream& input) {
     const std::uint32_t length = read_binary<std::uint32_t>(input);
+    if (length > kMaxWaveSettingsStringBytes) {
+        throw std::runtime_error("wave settings string too large");
+    }
     std::string value(length, '\0');
     if (length > 0) {
         input.read(value.data(), static_cast<std::streamsize>(length));
@@ -833,22 +860,6 @@ std::filesystem::path with_wave_settings_extension(std::filesystem::path path) {
         path += kWaveSettingsExtension;
     }
     return path;
-}
-
-bool save_screenshot(const std::string& path, int width, int height) {
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
-                                      static_cast<std::size_t>(height) * 4u);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-
-    std::vector<unsigned char> flipped(pixels.size());
-    for (int y = 0; y < height; ++y) {
-        std::memcpy(&flipped[static_cast<std::size_t>(height - 1 - y) *
-                             static_cast<std::size_t>(width) * 4u],
-                    &pixels[static_cast<std::size_t>(y) *
-                            static_cast<std::size_t>(width) * 4u],
-                    static_cast<std::size_t>(width) * 4u);
-    }
-    return stbi_write_png(path.c_str(), width, height, 4, flipped.data(), width * 4) != 0;
 }
 
 std::size_t nice_tick(double raw) {
@@ -1047,7 +1058,7 @@ double wave_wavelength_at_nm(const WaveEntity& wave, double x_nm) {
 
 double wave_value_at_nm(const WaveEntity& wave, double x_nm) {
     const double wavelength = wave_wavelength_at_nm(wave, x_nm);
-    const double theta = 2.0 * kPi * (x_nm - wave.phase_nm) / wavelength;
+    const double theta = 2.0 * std::numbers::pi * (x_nm - wave.phase_nm) / wavelength;
     return wave.amplitude_offset + wave.amplitude * ((std::sin(theta) + 1.0) * 0.5);
 }
 
@@ -1257,12 +1268,11 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
 
     const std::uint8_t show_points = state.show_points ? 1 : 0;
     const std::uint8_t show_lines = state.show_lines ? 1 : 0;
-    const std::uint8_t show_sine = state.show_sine ? 1 : 0;
-    const std::uint8_t show_cosine = state.show_cosine ? 1 : 0;
+    constexpr std::uint8_t reserved_byte = 1;
     write_binary(output, show_points);
     write_binary(output, show_lines);
-    write_binary(output, show_sine);
-    write_binary(output, show_cosine);
+    write_binary(output, reserved_byte);
+    write_binary(output, reserved_byte);
 
     const double sine_phase = state.analysis ? state.analysis->sine.phase_radians : 0.0;
     const double cosine_phase = state.analysis ? state.analysis->cosine.phase_radians : 0.0;
@@ -1336,12 +1346,15 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     state.zoom_y = read_binary<float>(input);
     state.show_points = read_binary<std::uint8_t>(input) != 0;
     state.show_lines = read_binary<std::uint8_t>(input) != 0;
-    state.show_sine = read_binary<std::uint8_t>(input) != 0;
-    state.show_cosine = read_binary<std::uint8_t>(input) != 0;
+    (void)read_binary<std::uint8_t>(input);
+    (void)read_binary<std::uint8_t>(input);
     const double sine_phase = read_binary<double>(input);
     const double cosine_phase = read_binary<double>(input);
 
     const std::uint32_t mapper_count = read_binary<std::uint32_t>(input);
+    if (mapper_count > kMaxWaveSettingsItems) {
+        throw std::runtime_error("wave settings mapper count too large");
+    }
     state.mappers.clear();
     state.mappers.reserve(mapper_count);
     for (std::uint32_t i = 0; i < mapper_count; ++i) {
@@ -1354,6 +1367,9 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
 
     if (version >= 2) {
         const std::uint32_t entity_count = read_binary<std::uint32_t>(input);
+        if (entity_count > kMaxWaveSettingsItems) {
+            throw std::runtime_error("wave settings entity count too large");
+        }
         state.entities.clear();
         state.entities.reserve(entity_count);
         int max_entity_id = 0;
@@ -1370,6 +1386,9 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
             entity.wave.amplitude_offset = read_binary<double>(input);
             entity.wave.phase_nm = read_binary<double>(input);
             const std::uint32_t modifier_count = read_binary<std::uint32_t>(input);
+            if (modifier_count > kMaxWaveSettingsItems) {
+                throw std::runtime_error("wave settings modifier count too large");
+            }
             entity.wave.wavelength_modifiers.reserve(modifier_count);
             for (std::uint32_t modifier_index = 0; modifier_index < modifier_count;
                  ++modifier_index) {
@@ -1492,12 +1511,18 @@ void configure_file_dialog(AppState& state, DialogPurpose purpose) {
                 parent = home_or_current_path();
             }
         }
-        copy_to_buffer(state.file_dialog.cwd, parent.string());
+        const std::string parent_text = parent.string();
+        if (parent_text.size() >= sizeof(state.file_dialog.cwd)) {
+            copy_to_buffer(state.file_dialog.cwd, home_or_current_path().string());
+        } else {
+            copy_to_buffer(state.file_dialog.cwd, parent_text);
+        }
         copy_to_buffer(state.file_dialog.filename, selected.filename().string());
     } else {
         copy_to_buffer(state.file_dialog.cwd, home_or_current_path().string());
         if (purpose == DialogPurpose::SaveWave) {
-            copy_to_buffer(state.file_dialog.filename, std::string("wave") + kWaveSettingsExtension);
+            copy_to_buffer(state.file_dialog.filename,
+                           std::string("wave") + kWaveSettingsExtension);
         } else {
             state.file_dialog.filename[0] = '\0';
         }
@@ -1511,7 +1536,7 @@ void configure_file_dialog(AppState& state, DialogPurpose purpose) {
 
     state.file_dialog.row_sel = -1;
     state.file_dialog_last_row = -1;
-    refresh_file_dialog_entries(state);
+    state.file_dialog_dirty = true;
 }
 
 void request_file_dialog(AppState& state, DialogPurpose purpose) {
@@ -1520,11 +1545,12 @@ void request_file_dialog(AppState& state, DialogPurpose purpose) {
 }
 
 bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = false) {
+    const ImU32 text_color = accent
+        ? ImGui::GetColorU32(ImGui::GetStyle().Colors[ImGuiCol_CheckMark])
+        : skald::tokens::ink::primary;
     ImGui::PushStyleColor(ImGuiCol_Text,
-                          skald::tokens::to_vec4(accent ? ImGui::GetColorU32(
-                                                        ImGui::GetStyle().Colors[ImGuiCol_CheckMark])
-                                                      : skald::tokens::ink::primary));
-    const bool clicked = skald::IconButton(glyph, tooltip, 30.0f);
+                          skald::tokens::to_vec4(text_color));
+    const bool clicked = skald::IconButton(glyph, tooltip);
     ImGui::PopStyleColor();
     return clicked;
 }
@@ -1544,7 +1570,7 @@ bool window_control_button(WindowControl control, const char* tooltip, GLFWwindo
     const ImU32 fill = control == WindowControl::Close && hovered
         ? skald::tokens::with_alpha(skald::tokens::status::destructive, active ? 0.70f : 0.52f)
         : hovered ? skald::tokens::surface::control
-                  : IM_COL32(0, 0, 0, 0);
+                  : kTransparent;
     const ImU32 ink = hovered ? skald::tokens::ink::primary
                               : skald::tokens::ink::muted;
     draw->AddRectFilled(pos,
@@ -1598,13 +1624,13 @@ bool window_control_button(WindowControl control, const char* tooltip, GLFWwindo
     return clicked;
 }
 
-void draw_titlebar(AppState& state, GLFWwindow* window) {
+ImVec2 begin_titlebar_chrome(const char* id) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(viewport.x, kTopChromeHeight));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 7.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::Begin("##titlebar", nullptr,
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, skald::tokens::pad::window);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::none);
+    ImGui::Begin(id, nullptr,
                  ImGuiWindowFlags_NoTitleBar |
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoMove |
@@ -1612,7 +1638,10 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
                  ImGuiWindowFlags_NoBringToFrontOnFocus |
                  ImGuiWindowFlags_NoNavFocus);
     ImGui::PopStyleVar(2);
+    return viewport;
+}
 
+void draw_titlebar_background(const ImVec2& viewport) {
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(ImVec2(0.0f, 0.0f),
                         ImVec2(viewport.x, kTopChromeHeight),
@@ -1621,7 +1650,9 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
                   ImVec2(viewport.x, kTopChromeHeight - 1.0f),
                   skald::tokens::border::separator,
                   1.0f);
+}
 
+void draw_titlebar_wordmark(AppState& state, const char* tagline) {
     ImGui::SetCursorPos(ImVec2(16.0f, 10.0f));
     if (state.fonts.sans_md) {
         ImGui::PushFont(state.fonts.sans_md);
@@ -1632,7 +1663,14 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     }
     ImGui::SameLine(72.0f);
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
-                       "/ wave workspace");
+                       "%s",
+                       tagline);
+}
+
+void draw_titlebar(AppState& state, GLFWwindow* window) {
+    const ImVec2 viewport = begin_titlebar_chrome("##titlebar");
+    draw_titlebar_background(viewport);
+    draw_titlebar_wordmark(state, "/ wave workspace");
 
     ImGui::SameLine(188.0f);
     if (skald::GhostButton("File", ImVec2(52.0f, 0.0f))) {
@@ -1651,7 +1689,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         if (ImGui::MenuItem("Save Wave Data...")) {
             request_file_dialog(state, DialogPurpose::SaveWave);
         }
-        ImGui::Separator();
+        skald::MutedSeparator();
         if (ImGui::MenuItem("Exit")) {
             state.request_close = true;
         }
@@ -1676,7 +1714,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         ImGui::OpenPopup("##create_menu");
     }
     if (ImGui::BeginPopup("##create_menu")) {
-        if (ImGui::MenuItem("Wave", "Ctrl/Cmd+A")) {
+        if (ImGui::MenuItem("Wave", "Ctrl/Cmd+W")) {
             create_wave_entity(state);
         }
         if (ImGui::MenuItem("Interpolated Wave")) {
@@ -1734,13 +1772,14 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
 bool value_bar_double(const char* label,
                       double* value,
                       double step_per_pixel,
-                      const char* format = "%.4f") {
+                      const char* format = "%.4f",
+                      ImFont* mono_font = nullptr) {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);
     const float width = std::max(80.0f, ImGui::GetContentRegionAvail().x);
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const ImVec2 size(width, 28.0f);
-    const bool pressed = ImGui::InvisibleButton("##value_bar", size);
+    ImGui::InvisibleButton("##value_bar", size);
     const bool active = ImGui::IsItemActive();
     const bool hovered = ImGui::IsItemHovered();
     bool changed = false;
@@ -1762,20 +1801,29 @@ bool value_bar_double(const char* label,
                   skald::tokens::border::default_, skald::tokens::radii::ctrl);
     char text[128] = {};
     std::snprintf(text, sizeof(text), format, *value);
+    if (mono_font) {
+        ImGui::PushFont(mono_font);
+    }
     const ImVec2 text_size = ImGui::CalcTextSize(text);
     draw->AddText(ImVec2(pos.x + size.x - text_size.x - 10.0f,
                          pos.y + (size.y - text_size.y) * 0.5f),
                   skald::tokens::ink::primary, text);
+    if (mono_font) {
+        ImGui::PopFont();
+    }
     if (hovered) {
-        skald::Tooltip(pressed ? "Drag right or left" : "Drag right or left");
+        skald::Tooltip("Drag left or right to adjust");
     }
     ImGui::PopID();
     return changed;
 }
 
-bool value_bar_int(const char* label, int* value, double step_per_pixel) {
+bool value_bar_int(const char* label,
+                   int* value,
+                   double step_per_pixel,
+                   ImFont* mono_font = nullptr) {
     double editable = static_cast<double>(*value);
-    const bool changed = value_bar_double(label, &editable, step_per_pixel, "%.0f");
+    const bool changed = value_bar_double(label, &editable, step_per_pixel, "%.0f", mono_font);
     if (changed) {
         *value = static_cast<int>(std::llround(editable));
     }
@@ -1844,17 +1892,18 @@ void draw_value_mapper_stack(AppState& state) {
                                                 "%.6f");
 
             ImGui::TableSetColumnIndex(3);
-            if (ImGui::SmallButton("^") && i > 0) {
+            if (skald::IconButton(skald::icons::kChevronRight, "Move up", 22.0f) && i > 0) {
                 move_from = static_cast<int>(i);
                 move_to = static_cast<int>(i - 1);
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("v") && i + 1 < state.mappers.size()) {
+            if (skald::IconButton(skald::icons::kChevronDown, "Move down", 22.0f) &&
+                i + 1 < state.mappers.size()) {
                 move_from = static_cast<int>(i);
                 move_to = static_cast<int>(i + 1);
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("x")) {
+            if (skald::IconButton(skald::icons::kX, "Remove", 22.0f)) {
                 remove_index = static_cast<int>(i);
             }
             ImGui::PopID();
@@ -1906,13 +1955,18 @@ void draw_inspector_overlay(AppState& state) {
 
     ImGui::SetNextWindowPos(ImVec2(18.0f, kTopChromeHeight + 18.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(340.0f, 360.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Inspector Overlay", &state.show_inspector_overlay,
+    if (!ImGui::Begin("##inspector_overlay", &state.show_inspector_overlay,
+                      ImGuiWindowFlags_NoTitleBar |
                       ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
     }
 
+    skald::SectionHeader("Inspector");
     skald::SectionHeader("Analysis");
+    if (state.fonts.mono) {
+        ImGui::PushFont(state.fonts.mono);
+    }
     if (state.analysis) {
         const thrystr::Analysis& a = *state.analysis;
         skald::KvRow("source", "%s", format_bytes(a.source_size).c_str());
@@ -1938,6 +1992,9 @@ void draw_inspector_overlay(AppState& state) {
         skald::KvRow("cos phase", "%.4f", a.cosine.phase_radians);
         skald::KvRow("tested", "%s", format_count(a.sine.tested_points).c_str());
     }
+    if (state.fonts.mono) {
+        ImGui::PopFont();
+    }
 
     ImGui::End();
 }
@@ -1949,6 +2006,10 @@ void draw_settings_dialog(AppState& state) {
 
     bool open = state.show_settings;
     ImGui::SetNextWindowSize(kSettingsDialogSize, ImGuiCond_Appearing);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,
+                          skald::tokens::to_vec4(skald::tokens::surface::panel));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, skald::tokens::pad::window);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::modal);
     if (ImGui::BeginPopupModal("Settings", &open, ImGuiWindowFlags_NoCollapse)) {
         skald::SectionHeader("Overlays");
         skald::PillToggle("Inspector overlay", &state.show_inspector_overlay);
@@ -1960,10 +2021,10 @@ void draw_settings_dialog(AppState& state) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         double zoom_x = static_cast<double>(state.zoom_x);
         double zoom_y = static_cast<double>(state.zoom_y);
-        if (value_bar_double("x zoom", &zoom_x, 0.01, "%.2f")) {
+        if (value_bar_double("x zoom", &zoom_x, 0.01, "%.2f", state.fonts.mono)) {
             state.zoom_x = static_cast<float>(zoom_x);
         }
-        if (value_bar_double("y zoom", &zoom_y, 0.01, "%.2f")) {
+        if (value_bar_double("y zoom", &zoom_y, 0.01, "%.2f", state.fonts.mono)) {
             state.zoom_y = static_cast<float>(zoom_y);
         }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -1973,6 +2034,8 @@ void draw_settings_dialog(AppState& state) {
         }
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
     if (!open) {
         state.show_settings = false;
     }
@@ -1988,179 +2051,48 @@ StartupAction draw_splash(AppState& state) {
     const ImVec2 body_size(viewport.x, std::max(160.0f, viewport.y - body_top));
     ImGui::SetNextWindowPos(ImVec2(0.0f, body_top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(body_size, ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 26.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("##splash_host", nullptr,
                  ImGuiWindowFlags_NoDecoration |
                  ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_NoScrollbar |
                  ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::PopStyleVar(2);
 
-    auto* draw = ImGui::GetWindowDrawList();
-    const ImVec2 min = ImGui::GetWindowPos();
-    const ImVec2 max(min.x + ImGui::GetWindowWidth(), min.y + ImGui::GetWindowHeight());
-    draw->AddRectFilled(min, max, skald::tokens::surface::window);
-    draw->AddRectFilled(ImVec2(min.x, min.y),
-                        ImVec2(max.x, min.y + 160.0f),
-                        skald::tokens::surface::deep);
-    draw->AddLine(ImVec2(min.x, min.y + 160.0f),
-                  ImVec2(max.x, min.y + 160.0f),
-                  skald::tokens::border::separator,
-                  1.0f);
-
-    const float content_w = std::min(940.0f, std::max(320.0f, body_size.x - 56.0f));
-    const float content_x = min.x + std::max(28.0f, (body_size.x - content_w) * 0.5f);
-    const float header_y = min.y + 46.0f;
-
-    ImGui::SetCursorScreenPos(ImVec2(content_x, header_y));
-    if (state.fonts.hero) {
-        ImGui::PushFont(state.fonts.hero);
-    } else if (state.fonts.sans_md) {
-        ImGui::PushFont(state.fonts.sans_md);
-    }
-    ImGui::TextUnformatted("thrystr");
-    if (state.fonts.hero || state.fonts.sans_md) {
-        ImGui::PopFont();
-    }
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
-                       "Scalar wave workspace");
-
-    const float column_gap = 44.0f;
-    const bool stacked = content_w < 720.0f;
-    const float column_w = stacked ? content_w : (content_w - column_gap) * 0.5f;
-    const float left_x = content_x;
-    const float right_x = stacked ? content_x : content_x + column_w + column_gap;
-    const float start_y = min.y + 210.0f;
-    const float second_y = stacked ? start_y + 168.0f : start_y;
-
-    ImGui::SetCursorScreenPos(ImVec2(left_x, start_y));
-    skald::SectionHeader("Recent");
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::dim),
-                       "No recent workspace");
-    ImGui::Dummy(ImVec2(column_w, 20.0f));
-
-    ImGui::SetCursorScreenPos(ImVec2(right_x, second_y));
-    skald::SectionHeader("Workspace");
-    const ImVec2 action_size(column_w, 34.0f);
-    StartupAction choice = StartupAction::None;
-    auto action_row = [&](const char* id,
-                          const char* icon,
-                          const char* label,
-                          const char* shortcut,
-                          const char* tooltip,
-                          ImVec2 pos,
-                          bool primary) {
-        ImGui::SetCursorScreenPos(pos);
-        ImGui::InvisibleButton(id, action_size);
-        const bool hovered = ImGui::IsItemHovered();
-        const bool active = ImGui::IsItemActive();
-        const bool clicked = ImGui::IsItemClicked();
-        const ImU32 fill = active ? skald::tokens::surface::control_act
-            : hovered ? skald::tokens::surface::control_hi
-                      : primary ? skald::tokens::surface::control
-                                : skald::tokens::surface::panel;
-        const ImU32 border = primary ? skald::tokens::border::strong
-                                     : skald::tokens::border::default_;
-        draw->AddRectFilled(pos,
-                            ImVec2(pos.x + action_size.x, pos.y + action_size.y),
-                            fill,
-                            skald::tokens::radii::ctrl);
-        draw->AddRect(pos,
-                      ImVec2(pos.x + action_size.x, pos.y + action_size.y),
-                      border,
-                      skald::tokens::radii::ctrl,
-                      0,
-                      1.0f);
-
-        char text[160] = {};
-        std::snprintf(text, sizeof(text), "%s  %s", icon, label);
-        draw->AddText(ImVec2(pos.x + 14.0f, pos.y + 9.0f),
-                      skald::tokens::ink::primary,
-                      text);
-        if (shortcut && shortcut[0] != '\0') {
-            const ImVec2 shortcut_size = ImGui::CalcTextSize(shortcut);
-            draw->AddText(ImVec2(pos.x + action_size.x - shortcut_size.x - 14.0f,
-                                 pos.y + 9.0f),
-                          skald::tokens::ink::dim,
-                          shortcut);
-        }
-        if (hovered && tooltip && tooltip[0] != '\0') {
-            skald::Tooltip(tooltip);
-        }
-        return clicked;
-    };
-
-    float action_y = second_y + 28.0f;
-    if (action_row("##splash_new_workspace",
-                   skald::icons::kPlus,
-                   "New workspace",
-                   "Ctrl+N",
-                   "Create an empty workspace",
-                   ImVec2(right_x, action_y),
-                   true)) {
-        choice = StartupAction::NewWorkspace;
-    }
-    action_y += action_size.y + 8.0f;
-    if (action_row("##splash_open_workspace",
-                   skald::icons::kFolder,
-                   "Open workspace",
-                   "",
-                   "Load saved wave data",
-                   ImVec2(right_x, action_y),
-                   false)) {
-        choice = StartupAction::OpenWorkspace;
-    }
-    action_y += action_size.y + 8.0f;
-    if (action_row("##splash_load_source",
-                   skald::icons::kFile,
-                   "Load source",
-                   "",
-                   "Load a source data file",
-                   ImVec2(right_x, action_y),
-                   false)) {
-        choice = StartupAction::LoadSource;
-    }
+    const std::array<skald::SplashAction, 3> actions = {{
+        {"New workspace", "Ctrl+N"},
+        {"Open workspace", ""},
+        {"Load source", ""},
+    }};
+    const skald::SplashChoice splash_choice = skald::Splash(
+        "thrystr",
+        "Scalar wave workspace",
+        {},
+        std::span<const skald::SplashAction>(actions.data(), actions.size()),
+        static_cast<ImTextureID>(state.splash_hero_texture),
+        state.splash_hero_size,
+        state.fonts.hero);
 
     ImGui::End();
-    return choice;
+
+    if (splash_choice.kind == skald::SplashChoice::Kind::Action) {
+        switch (splash_choice.index) {
+        case 0:
+            return StartupAction::NewWorkspace;
+        case 1:
+            return StartupAction::OpenWorkspace;
+        case 2:
+            return StartupAction::LoadSource;
+        default:
+            break;
+        }
+    }
+    return StartupAction::None;
 }
 
 void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
-    const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(viewport.x, kTopChromeHeight));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 7.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::Begin("##splash_titlebar", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus |
-                 ImGuiWindowFlags_NoNavFocus);
-    ImGui::PopStyleVar(2);
-
-    auto* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(ImVec2(0.0f, 0.0f),
-                        ImVec2(viewport.x, kTopChromeHeight),
-                        skald::tokens::surface::deep);
-    draw->AddLine(ImVec2(0.0f, kTopChromeHeight - 1.0f),
-                  ImVec2(viewport.x, kTopChromeHeight - 1.0f),
-                  skald::tokens::border::separator,
-                  1.0f);
-
-    ImGui::SetCursorPos(ImVec2(16.0f, 10.0f));
-    if (state.fonts.sans_md) {
-        ImGui::PushFont(state.fonts.sans_md);
-    }
-    ImGui::TextUnformatted("thrystr");
-    if (state.fonts.sans_md) {
-        ImGui::PopFont();
-    }
-    ImGui::SameLine(72.0f);
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "/ start");
+    const ImVec2 viewport = begin_titlebar_chrome("##splash_titlebar");
+    draw_titlebar_background(viewport);
+    draw_titlebar_wordmark(state, "/ start");
 
     ImGui::SetCursorPos(ImVec2(viewport.x - 40.0f, 8.0f));
     if (window_control_button(WindowControl::Close, "Close", window)) {
@@ -2189,11 +2121,13 @@ void draw_entity_toolbox(AppState& state) {
                                    kTopChromeHeight));
     ImGui::SetNextWindowSize(ImVec2(std::min(kToolboxWidth, viewport.x),
                                     std::max(120.0f, viewport.y - kTopChromeHeight)));
-    ImGui::Begin("Toolbox", nullptr,
+    ImGui::Begin("##toolbox", nullptr,
+                 ImGuiWindowFlags_NoTitleBar |
                  ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoCollapse);
 
+    skald::SectionHeader("Toolbox");
     skald::SectionHeader("Entities");
     if (skald::AccentButton("+ Wave", ImVec2(92.0f, 0.0f))) {
         create_wave_entity(state);
@@ -2232,7 +2166,7 @@ void draw_entity_toolbox(AppState& state) {
         }
         if (data &&
             value_bar_double("point spacing nm", &data->data.spatial_period_nm,
-                             0.01, "%.6f")) {
+                             0.01, "%.6f", state.fonts.mono)) {
             data->data.spatial_period_nm =
                 std::max(0.000001, data->data.spatial_period_nm);
         }
@@ -2250,8 +2184,16 @@ void draw_entity_toolbox(AppState& state) {
                 double start_index = static_cast<double>(state.segment.selection_start);
                 double end_index = static_cast<double>(state.segment.selection_end);
                 bool changed = false;
-                changed |= value_bar_double("start index", &start_index, 0.25, "%.0f");
-                changed |= value_bar_double("end index", &end_index, 0.25, "%.0f");
+                changed |= value_bar_double("start index",
+                                            &start_index,
+                                            0.25,
+                                            "%.0f",
+                                            state.fonts.mono);
+                changed |= value_bar_double("end index",
+                                            &end_index,
+                                            0.25,
+                                            "%.0f",
+                                            state.fonts.mono);
                 if (changed) {
                     const std::size_t count = state.analysis->scalars.size();
                     state.segment.selection_start = clamp_index(start_index, count);
@@ -2263,8 +2205,16 @@ void draw_entity_toolbox(AppState& state) {
                 double end_nm =
                     static_cast<double>(state.segment.selection_end) * period;
                 bool nm_changed = false;
-                nm_changed |= value_bar_double("start nm", &start_nm, period * 0.25, "%.3f");
-                nm_changed |= value_bar_double("end nm", &end_nm, period * 0.25, "%.3f");
+                nm_changed |= value_bar_double("start nm",
+                                               &start_nm,
+                                               period * 0.25,
+                                               "%.3f",
+                                               state.fonts.mono);
+                nm_changed |= value_bar_double("end nm",
+                                               &end_nm,
+                                               period * 0.25,
+                                               "%.3f",
+                                               state.fonts.mono);
                 if (nm_changed) {
                     const std::size_t count = state.analysis->scalars.size();
                     state.segment.selection_start = clamp_index(start_nm / period, count);
@@ -2306,10 +2256,21 @@ void draw_entity_toolbox(AppState& state) {
         bool params_changed = false;
         double max_slope = static_cast<double>(state.max_slope);
         double wave_tolerance = static_cast<double>(state.wave_tolerance);
-        params_changed |= value_bar_double("max slope", &max_slope, 0.001, "%.4f");
-        params_changed |= value_bar_double("wave tolerance", &wave_tolerance, 0.0001, "%.5f");
-        params_changed |= value_bar_int("phase steps", &state.phase_steps, 4.0);
-        params_changed |= value_bar_int("phase samples", &state.phase_test_points, 512.0);
+        params_changed |= value_bar_double("max slope",
+                                           &max_slope,
+                                           0.001,
+                                           "%.4f",
+                                           state.fonts.mono);
+        params_changed |= value_bar_double("wave tolerance",
+                                           &wave_tolerance,
+                                           0.0001,
+                                           "%.5f",
+                                           state.fonts.mono);
+        params_changed |= value_bar_int("phase steps", &state.phase_steps, 4.0, state.fonts.mono);
+        params_changed |= value_bar_int("phase samples",
+                                        &state.phase_test_points,
+                                        512.0,
+                                        state.fonts.mono);
         state.max_slope = static_cast<float>(max_slope);
         state.wave_tolerance = static_cast<float>(wave_tolerance);
         if (params_changed) {
@@ -2324,10 +2285,18 @@ void draw_entity_toolbox(AppState& state) {
     } else {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("Wave");
-        value_bar_double("wave spatial distance nm", &selected->wave.wavelength_nm, 0.10, "%.4f");
-        value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f");
-        value_bar_double("amplitude offset", &selected->wave.amplitude_offset, 0.01, "%.4f");
-        value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f");
+        value_bar_double("wave spatial distance nm",
+                         &selected->wave.wavelength_nm,
+                         0.10,
+                         "%.4f",
+                         state.fonts.mono);
+        value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f", state.fonts.mono);
+        value_bar_double("amplitude offset",
+                         &selected->wave.amplitude_offset,
+                         0.01,
+                         "%.4f",
+                         state.fonts.mono);
+        value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f", state.fonts.mono);
         skald::KvRow("modifiers", "%s",
                      format_count(selected->wave.wavelength_modifiers.size()).c_str());
         if (skald::GhostButton("Fit Selection", ImVec2(124.0f, 0.0f))) {
@@ -2386,7 +2355,7 @@ void draw_data_point_markers(ImDrawList* draw,
         for (std::size_t i = first; i <= last && i < count; ++i) {
             const ImVec2 point(plot_left + static_cast<float>(i) * x_step,
                                y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom));
-            draw->AddCircleFilled(point, 2.2f, IM_COL32(238, 241, 245, 235));
+            draw->AddCircleFilled(point, 2.2f, kDataPointHi);
         }
         return;
     }
@@ -2420,11 +2389,11 @@ void draw_data_point_markers(ImDrawList* draw,
         if (std::abs(max_y[index] - min_y[index]) < 1.0f) {
             draw->AddRectFilled(ImVec2(x - 0.5f, min_y[index] - 0.5f),
                                 ImVec2(x + 0.5f, min_y[index] + 0.5f),
-                                IM_COL32(238, 241, 245, 220));
+                                kDataPointMed);
         } else {
             draw->AddLine(ImVec2(x, min_y[index]),
                           ImVec2(x, max_y[index]),
-                          IM_COL32(238, 241, 245, 185),
+                          kDataPointLo,
                           1.0f);
         }
     }
@@ -2558,7 +2527,7 @@ void draw_plot(AppState& state) {
         const float x = plot_left + static_cast<float>(delta_index) * x_step;
         draw->AddRectFilled(ImVec2(x - 2.0f, plot_top),
                             ImVec2(x + std::max(2.0f, x_step + 2.0f), plot_bottom),
-                            IM_COL32(208, 127, 127, 40));
+                            kMaxDeltaFill);
         draw->AddText(ImVec2(x + 6.0f, plot_top + 6.0f),
                       skald::tokens::status::destructive, "max delta");
     }
@@ -2569,15 +2538,15 @@ void draw_plot(AppState& state) {
         const float start_x = plot_left + static_cast<float>(selection_first) * x_step;
         const float end_x = plot_left + static_cast<float>(selection_last) * x_step;
         draw->AddRectFilled(ImVec2(start_x, plot_top), ImVec2(end_x, plot_bottom),
-                            IM_COL32(88, 170, 210, 32));
+                            kSelectionFill);
         draw->AddLine(ImVec2(start_x, plot_top), ImVec2(start_x, plot_bottom),
-                      IM_COL32(88, 170, 210, 210), 2.0f);
+                      kSelectionEdge, 2.0f);
         draw->AddLine(ImVec2(end_x, plot_top), ImVec2(end_x, plot_bottom),
-                      IM_COL32(88, 170, 210, 210), 2.0f);
+                      kSelectionEdge, 2.0f);
         draw->AddCircleFilled(ImVec2(start_x, plot_top + 8.0f), 4.0f,
-                              IM_COL32(88, 170, 210, 235));
+                              kSelectionHandle);
         draw->AddCircleFilled(ImVec2(end_x, plot_top + 8.0f), 4.0f,
-                              IM_COL32(88, 170, 210, 235));
+                              kSelectionHandle);
     }
 
     const ImVec2 mouse = ImGui::GetIO().MousePos;
@@ -2629,17 +2598,9 @@ void draw_plot(AppState& state) {
                            y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom));
             const ImVec2 b(plot_left + static_cast<float>(i + 1) * x_step,
                            y_for_value(analysis.scalars[i + 1], plot_top, plot_bottom, y_zoom));
-            draw->AddLine(a, b, IM_COL32(90, 142, 210, 235), 1.2f);
+            draw->AddLine(a, b, kDataLineColor, 1.2f);
         }
     }
-    static constexpr std::array<ImU32, 6> kWaveColors = {
-        IM_COL32(214, 160, 63, 220),
-        IM_COL32(74, 160, 104, 220),
-        IM_COL32(201, 94, 139, 220),
-        IM_COL32(139, 122, 224, 220),
-        IM_COL32(215, 107, 73, 220),
-        IM_COL32(94, 183, 188, 220),
-    };
     std::size_t wave_index = 0;
     for (const Entity& entity : state.entities) {
         if (entity.type != EntityType::Wave || !entity.visible || last <= first) {
@@ -2688,9 +2649,9 @@ void draw_plot(AppState& state) {
     draw->AddText(ImVec2(child_pos.x + margin_left, child_pos.y + 8.0f),
                   skald::tokens::ink::primary, "x-line section");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 178.0f, child_pos.y + 8.0f),
-                  IM_COL32(90, 142, 210, 235), "data");
+                  kDataLineColor, "data");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 108.0f, child_pos.y + 8.0f),
-                  IM_COL32(214, 160, 63, 210), "waves");
+                  kWaveColors[0], "waves");
 
     draw->PopClipRect();
     ImGui::EndChild();
@@ -2722,6 +2683,7 @@ void navigate_file_dialog_selection(AppState& state) {
     state.file_dialog.row_sel = -1;
     state.file_dialog_last_row = -1;
     refresh_file_dialog_entries(state);
+    state.file_dialog_dirty = false;
 }
 
 const char* file_dialog_popup_label(DialogPurpose purpose) {
@@ -2743,122 +2705,26 @@ skald::FileDialogResult begin_chromed_file_dialog(
     skald::FileDialogMode mode,
     skald::FileDialogState& dialog,
     std::span<const skald::FileDialogEntry> entries) {
-    skald::FileDialogResult out = skald::FileDialogResult::None;
-    ImGui::SetNextWindowSize(kFileDialogSize, ImGuiCond_Appearing);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,
-                          skald::tokens::to_vec4(skald::tokens::surface::panel));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 14.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::modal);
-    if (!ImGui::BeginPopupModal(file_dialog_popup_label(purpose),
-                                nullptr,
-                                ImGuiWindowFlags_NoCollapse)) {
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor();
-        return out;
-    }
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
-
-    skald::SectionHeader(mode == skald::FileDialogMode::Open ? "Open" : "Save");
-
-    const float btn_w = 30.0f;
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,
-                          skald::tokens::to_vec4(skald::tokens::surface::input));
-    ImGui::SetNextItemWidth(-(190.0f + btn_w + 12.0f));
-    ImGui::InputTextWithHint("##cwd", "path", dialog.cwd, sizeof dialog.cwd);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(190.0f);
-    ImGui::InputTextWithHint("##filter", "filter", dialog.filter, sizeof dialog.filter);
-    ImGui::SameLine();
-    skald::IconButton(skald::icons::kCog, "Folder options", btn_w);
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    const float listing_h = std::max(220.0f, ImGui::GetContentRegionAvail().y - 92.0f);
-    if (ImGui::BeginTable("##fdlist",
-                          3,
-                          ImGuiTableFlags_RowBg |
-                              ImGuiTableFlags_BordersInnerH |
-                              ImGuiTableFlags_ScrollY,
-                          ImVec2(0.0f, listing_h))) {
-        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-        ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 140.0f);
-        ImGui::TableHeadersRow();
-
-        for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
-            const skald::FileDialogEntry& entry = entries[static_cast<std::size_t>(i)];
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            const bool selected = i == dialog.row_sel;
-            char row_label[320] = {};
-            std::snprintf(row_label,
-                          sizeof(row_label),
-                          "%s  %.*s",
-                          entry.is_folder ? skald::icons::kFolder : skald::icons::kFile,
-                          static_cast<int>(entry.name.size()),
-                          entry.name.data());
-            if (ImGui::Selectable(row_label,
-                                  selected,
-                                  ImGuiSelectableFlags_SpanAllColumns,
-                                  ImVec2(0.0f, 24.0f))) {
-                dialog.row_sel = i;
-                if (!entry.is_folder) {
-                    std::snprintf(dialog.filename,
-                                  sizeof(dialog.filename),
-                                  "%.*s",
-                                  static_cast<int>(entry.name.size()),
-                                  entry.name.data());
-                }
-            }
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(entry.size.data(), entry.size.data() + entry.size.size());
-            ImGui::TableSetColumnIndex(2);
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                                  skald::tokens::to_vec4(skald::tokens::ink::muted));
-            ImGui::TextUnformatted(entry.modified.data(),
-                                   entry.modified.data() + entry.modified.size());
-            ImGui::PopStyleColor();
-        }
-        ImGui::EndTable();
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
-    ImGui::TextUnformatted("Filename");
-    ImGui::SameLine(118.0f);
-    const float action_w = 220.0f;
-    ImGui::SetNextItemWidth(-(action_w + 12.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,
-                          skald::tokens::to_vec4(skald::tokens::surface::input));
-    ImGui::InputText("##fname", dialog.filename, sizeof dialog.filename);
-    ImGui::PopStyleColor();
-    ImGui::SameLine();
-    if (skald::GhostButton("Cancel")) {
-        out = skald::FileDialogResult::Cancelled;
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (skald::AccentButton(mode == skald::FileDialogMode::Open ? "Open" : "Save")) {
-        out = skald::FileDialogResult::Confirmed;
-        ImGui::CloseCurrentPopup();
-    }
-
-    ImGui::EndPopup();
-    return out;
+    return skald::BeginFileDialog(file_dialog_popup_label(purpose), mode, dialog, entries);
 }
 
 void draw_file_dialog(AppState& state) {
     if (state.pending_dialog != DialogPurpose::None) {
         state.active_dialog = state.pending_dialog;
         state.pending_dialog = DialogPurpose::None;
-        ImGui::OpenPopup(file_dialog_popup_label(state.active_dialog));
+        skald::OpenFileDialog(file_dialog_popup_label(state.active_dialog));
     }
 
     if (state.active_dialog == DialogPurpose::None) {
         return;
     }
 
-    refresh_file_dialog_entries(state);
+    if (state.file_dialog_dirty) {
+        refresh_file_dialog_entries(state);
+        state.file_dialog_dirty = false;
+    }
+    const std::string cwd_before = state.file_dialog.cwd;
+    const std::string filter_before = state.file_dialog.filter;
     const skald::FileDialogMode mode = state.active_dialog == DialogPurpose::SaveWave
         ? skald::FileDialogMode::Save
         : skald::FileDialogMode::Open;
@@ -2869,6 +2735,9 @@ void draw_file_dialog(AppState& state) {
         std::span<const skald::FileDialogEntry>(state.file_dialog_entries.data(),
                                                 state.file_dialog_entries.size()));
 
+    if (cwd_before != state.file_dialog.cwd || filter_before != state.file_dialog.filter) {
+        state.file_dialog_dirty = true;
+    }
     navigate_file_dialog_selection(state);
 
     if (result == skald::FileDialogResult::Cancelled) {
@@ -2914,7 +2783,7 @@ void handle_shortcuts(AppState& state) {
         return;
     }
     const bool shortcut = io.KeyCtrl || io.KeySuper;
-    if (shortcut && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
+    if (shortcut && ImGui::IsKeyPressed(ImGuiKey_W, false)) {
         create_wave_entity(state);
     }
     if (shortcut && ImGui::IsKeyPressed(ImGuiKey_N, false)) {
@@ -2955,9 +2824,8 @@ int main(int argc, char** argv) {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         skald::ApplyDefaults(skald::tokens::accents::cyan);
-        state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR, 14.0f, 13.0f, 40.0f);
+        state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR);
         ImGui_ImplGlfw_InitForOpenGL(target, true);
         ImGui_ImplOpenGL3_Init("#version 130");
     };
@@ -2981,7 +2849,12 @@ int main(int argc, char** argv) {
         int fb_height = 0;
         glfwGetFramebufferSize(target, &fb_width, &fb_height);
         glViewport(0, 0, fb_width, fb_height);
-        glClearColor(0.035f, 0.040f, 0.055f, 1.0f);
+        constexpr ImU32 bg = skald::tokens::surface::deep;
+        glClearColor(
+            static_cast<float>((bg >> IM_COL32_R_SHIFT) & 0xff) / 255.0f,
+            static_cast<float>((bg >> IM_COL32_G_SHIFT) & 0xff) / 255.0f,
+            static_cast<float>((bg >> IM_COL32_B_SHIFT) & 0xff) / 255.0f,
+            1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(target);
@@ -3005,6 +2878,10 @@ int main(int argc, char** argv) {
         }
 
         begin_imgui_for_window(splash_window);
+        const thrystr::Texture2D hero_texture = thrystr::load_rgba_texture(kSplashHeroPath);
+        state.splash_hero_texture = hero_texture.id;
+        state.splash_hero_size =
+            ImVec2(static_cast<float>(hero_texture.width), static_cast<float>(hero_texture.height));
         glfwShowWindow(splash_window);
 
         int rendered_frames = 0;
@@ -3025,7 +2902,7 @@ int main(int argc, char** argv) {
             const auto [fb_width, fb_height] = render_frame(splash_window);
             ++rendered_frames;
             if (!args.screenshot.empty() && rendered_frames >= args.frames) {
-                if (!save_screenshot(args.screenshot, fb_width, fb_height)) {
+                if (!thrystr::save_screenshot_png(args.screenshot, fb_width, fb_height)) {
                     std::fprintf(stderr,
                                  "could not write screenshot: %s\n",
                                  args.screenshot.c_str());
@@ -3039,6 +2916,8 @@ int main(int argc, char** argv) {
             }
         }
 
+        thrystr::destroy_texture(state.splash_hero_texture);
+        state.splash_hero_size = {};
         shutdown_imgui();
         glfwDestroyWindow(splash_window);
         state.request_close = false;
@@ -3123,7 +3002,7 @@ int main(int argc, char** argv) {
 
         ++rendered_frames;
         if (!args.screenshot.empty() && rendered_frames >= args.frames) {
-            if (!save_screenshot(args.screenshot, fb_width, fb_height)) {
+            if (!thrystr::save_screenshot_png(args.screenshot, fb_width, fb_height)) {
                 std::fprintf(stderr, "could not write screenshot: %s\n", args.screenshot.c_str());
             }
             break;
