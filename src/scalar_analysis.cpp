@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <thrystr/scalar_analysis.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <deque>
 #include <fstream>
@@ -28,10 +30,12 @@ struct WindowScanResult {
     std::vector<std::uint8_t> mapped_bytes;
 };
 
+/// Return the adjacent-byte delta at a delta-index coordinate.
 std::uint8_t delta_at(std::span<const std::uint8_t> bytes, std::size_t index) {
     return adjacent_delta(bytes[index], bytes[index + 1]);
 }
 
+/// Read and validate a file size as `std::size_t`.
 std::size_t file_size_or_throw(const std::filesystem::path& path) {
     std::error_code error;
     const std::uintmax_t file_size = std::filesystem::file_size(path, error);
@@ -44,22 +48,37 @@ std::size_t file_size_or_throw(const std::filesystem::path& path) {
     return static_cast<std::size_t>(file_size);
 }
 
+/// Return true when at least one mapper will change scan behavior.
 bool has_enabled_mappers(std::span<const ValueMapper> mappers) {
     return std::any_of(mappers.begin(), mappers.end(), [](const ValueMapper& mapper) {
         return mapper.enabled;
     });
 }
 
+/// Recompute the highest delta currently represented in the histogram.
+std::uint8_t highest_delta_with_count(const std::array<std::uint32_t, 256>& counts) {
+    for (std::size_t value = counts.size(); value > 0u; --value) {
+        const std::size_t index = value - 1u;
+        if (counts[index] > 0u) {
+            return static_cast<std::uint8_t>(index);
+        }
+    }
+    return 0;
+}
+
+/// Copy one logical window out of a circular byte ring.
 void copy_window_from_ring(std::vector<std::uint8_t>& output,
                            const std::vector<std::uint8_t>& ring,
                            std::size_t offset,
                            std::size_t length) {
+    assert(length == ring.size());
     output.resize(length);
     for (std::size_t i = 0; i < length; ++i) {
         output[i] = ring[(offset + i) % length];
     }
 }
 
+/// Stream a file and keep only the highest-entropy window.
 WindowScanResult scan_highest_entropy_window_stream(const std::filesystem::path& path,
                                                     std::size_t window_bytes,
                                                     std::span<const ValueMapper> mappers) {
@@ -131,9 +150,8 @@ WindowScanResult scan_highest_entropy_window_stream(const std::filesystem::path&
                     const std::uint8_t expired_delta =
                         delta_ring[expired_index % delta_span];
                     --delta_counts[expired_delta];
-                    while (current_max_delta > 0u &&
-                           delta_counts[current_max_delta] == 0u) {
-                        --current_max_delta;
+                    if (delta_counts[current_max_delta] == 0u) {
+                        current_max_delta = highest_delta_with_count(delta_counts);
                     }
                 }
                 delta_ring[delta_index % delta_span] = delta;
@@ -197,6 +215,7 @@ WindowScanResult scan_highest_entropy_window_stream(const std::filesystem::path&
 }
 
 #if defined(__unix__)
+/// Memory-map a file and find its highest-entropy window without mapper work.
 WindowScanResult scan_highest_entropy_window_mapped(const std::filesystem::path& path,
                                                     std::size_t window_bytes) {
     WindowScanResult result;
@@ -244,8 +263,8 @@ WindowScanResult scan_highest_entropy_window_mapped(const std::filesystem::path&
             const std::size_t expired_index = delta_index - delta_span;
             const std::uint8_t expired_delta = delta_ring[expired_index % delta_span];
             --delta_counts[expired_delta];
-            while (current_max_delta > 0u && delta_counts[current_max_delta] == 0u) {
-                --current_max_delta;
+            if (delta_counts[current_max_delta] == 0u) {
+                current_max_delta = highest_delta_with_count(delta_counts);
             }
         }
 
@@ -294,6 +313,7 @@ WindowScanResult scan_highest_entropy_window_mapped(const std::filesystem::path&
 }
 #endif
 
+/// Pick the mapped or streaming implementation based on mapper requirements.
 WindowScanResult scan_highest_entropy_window(const std::filesystem::path& path,
                                              std::size_t window_bytes,
                                              std::span<const ValueMapper> mappers) {
@@ -345,10 +365,12 @@ double apply_value_mapper(double value, const ValueMapper& mapper) {
 }
 
 double apply_value_mappers(double value, std::span<const ValueMapper> mappers) {
-    for (const ValueMapper& mapper : mappers) {
+    for (std::size_t index = 0; index < mappers.size(); ++index) {
+        const ValueMapper& mapper = mappers[index];
         value = apply_value_mapper(value, mapper);
         if (!std::isfinite(value)) {
-            throw std::invalid_argument("mapper stack produced a non-finite value");
+            throw std::invalid_argument("mapper stack produced a non-finite value at stage " +
+                                        std::to_string(index));
         }
     }
     return value;
@@ -359,11 +381,11 @@ std::uint8_t unsigned_mod_256(double value) {
         throw std::invalid_argument("cannot wrap non-finite value");
     }
 
-    const double truncated = std::trunc(value);
-    double wrapped = std::fmod(truncated, 256.0);
+    double wrapped = std::fmod(std::trunc(value), 256.0);
     if (wrapped < 0.0) {
         wrapped += 256.0;
     }
+    wrapped = std::clamp(wrapped, 0.0, 255.0);
     return static_cast<std::uint8_t>(wrapped);
 }
 
@@ -493,6 +515,10 @@ PhaseFit fit_wave_phase(std::span<const float> scalars,
                         int phase_steps,
                         std::size_t max_test_points) {
     PhaseFit best{};
+    if (tolerance < 0.0) {
+        throw std::invalid_argument("wave tolerance must be non-negative");
+    }
+    tolerance = std::max(tolerance, std::numeric_limits<double>::epsilon());
     best.tolerance = tolerance;
     if (scalars.empty() || phase_steps <= 0 || max_test_points == 0) {
         return best;

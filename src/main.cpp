@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <thrystr/scalar_analysis.hpp>
 #include <thrystr/render_io.hpp>
 

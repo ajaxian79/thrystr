@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <thrystr/render_io.hpp>
 
 #include <GLFW/glfw3.h>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <cstddef>
 #include <cstdint>
 
