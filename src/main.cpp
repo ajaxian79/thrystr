@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <charconv>
@@ -39,6 +40,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -166,6 +169,20 @@ struct LazyBlock {
     std::uint64_t last_used_frame = 0;
 };
 
+struct AutoFitJob {
+    std::jthread worker;
+    std::atomic<bool> running{false};
+    std::atomic<bool> done{false};
+    std::atomic<bool> cancel_requested{false};
+    std::mutex result_mutex;
+    std::vector<thrystr::app::Section> sections;
+    bool cancelled = false;
+    std::size_t start_offset = 0;
+    std::size_t requested_last = 0;
+    std::size_t capped_last = 0;
+    std::string error;
+};
+
 struct Args {
     std::string file;
     std::string screenshot;
@@ -240,6 +257,7 @@ struct AppState {
     std::vector<Entity> entities;
     std::vector<thrystr::app::Section> fitted_sections;
     thrystr::app::ValidationReport fit_validation;
+    AutoFitJob auto_fit_job;
     Segment segment;
     int next_entity_id = 1;
     int selected_entity_id = 0;
@@ -1707,6 +1725,13 @@ void auto_fit_current_range(AppState& state) {
         state.status = "Load source data before auto-fit";
         return;
     }
+    if (state.auto_fit_job.running.load()) {
+        state.status = "Auto-fit is already running";
+        return;
+    }
+    if (state.auto_fit_job.worker.joinable()) {
+        state.auto_fit_job.worker.join();
+    }
 
     const auto [first, requested_last] = analysis_selection_bounds(state);
     const std::size_t capped_last =
@@ -1721,21 +1746,88 @@ void auto_fit_current_range(AppState& state) {
     options.tolerance = std::max(1.0e-9, static_cast<double>(state.wave_tolerance));
     options.default_spacing_nm = data_spatial_period_nm(state);
     options.max_section_length = std::min<std::size_t>(4096u, scalars.size());
-    const thrystr::app::ConvergentFitResult fit =
-        thrystr::app::fit_convergent_sections(scalars, options);
 
-    state.fitted_sections = fit.sections;
+    AutoFitJob& job = state.auto_fit_job;
+    job.cancel_requested.store(false);
+    job.done.store(false);
+    job.running.store(true);
+    job.cancelled = false;
+    job.start_offset = first;
+    job.requested_last = requested_last;
+    job.capped_last = capped_last;
+    job.error.clear();
+    {
+        std::scoped_lock lock(job.result_mutex);
+        job.sections.clear();
+    }
+
+    state.status = "Auto-fit running on " + format_count(scalars.size()) + " samples";
+    job.worker = std::jthread([&job,
+                               samples = std::move(scalars),
+                               options]() mutable {
+        try {
+            options.cancel_requested = &job.cancel_requested;
+            const thrystr::app::ConvergentFitResult fit =
+                thrystr::app::fit_convergent_sections(samples, options);
+            {
+                std::scoped_lock lock(job.result_mutex);
+                job.sections = fit.sections;
+                job.cancelled = fit.cancelled;
+            }
+        } catch (const std::exception& error) {
+            std::scoped_lock lock(job.result_mutex);
+            job.error = error.what();
+        }
+        job.done.store(true);
+    });
+}
+
+void cancel_auto_fit(AppState& state) {
+    if (!state.auto_fit_job.running.load()) {
+        return;
+    }
+    state.auto_fit_job.cancel_requested.store(true);
+    state.status = "Cancelling auto-fit";
+}
+
+void finish_auto_fit_if_ready(AppState& state) {
+    AutoFitJob& job = state.auto_fit_job;
+    if (!job.running.load() || !job.done.load()) {
+        return;
+    }
+    if (job.worker.joinable()) {
+        job.worker.join();
+    }
+
+    std::vector<thrystr::app::Section> sections;
+    bool cancelled = false;
+    std::string error;
+    {
+        std::scoped_lock lock(job.result_mutex);
+        sections = job.sections;
+        cancelled = job.cancelled;
+        error = job.error;
+    }
+    job.running.store(false);
+    job.done.store(false);
+
+    if (!error.empty()) {
+        state.status = "Auto-fit failed: " + error;
+        return;
+    }
+
+    state.fitted_sections = std::move(sections);
     for (thrystr::app::Section& section : state.fitted_sections) {
-        section.start_index += static_cast<std::uint32_t>(first);
+        section.start_index += static_cast<std::uint32_t>(job.start_offset);
     }
     state.fit_validation = validate_fitted_sections(state);
     state.show_reconstruction_only = true;
-    state.status = "Auto-fit: " + format_count(state.fitted_sections.size()) +
-                   " sections, " +
+    state.status = std::string(cancelled ? "Auto-fit cancelled: " : "Auto-fit: ") +
+                   format_count(state.fitted_sections.size()) + " sections, " +
                    format_count(state.fit_validation.checked_samples) +
                    " samples, max residual " +
                    std::to_string(state.fit_validation.max_residual);
-    if (requested_last != capped_last) {
+    if (job.requested_last != job.capped_last) {
         state.status += " (range capped)";
     }
 }
@@ -2985,7 +3077,12 @@ void draw_entity_toolbox(AppState& state) {
                     create_section(state);
                 }
                 ImGui::SameLine();
-                if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
+                if (state.auto_fit_job.running.load()) {
+                    if (skald::GhostButton("Cancel Fit", ImVec2(108.0f, 0.0f))) {
+                        cancel_auto_fit(state);
+                    }
+                    skald::KvRowStatus("auto-fit", "running", skald::BadgeTone::Info);
+                } else if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
                     auto_fit_current_range(state);
                 }
                 if (!state.fitted_sections.empty()) {
@@ -4116,6 +4213,7 @@ void handle_shortcuts(AppState& state) {
 }
 
 void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors) {
+    finish_auto_fit_if_ready(state);
     handle_shortcuts(state);
     draw_titlebar(state, window);
     draw_plot(state);
@@ -4334,6 +4432,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    cancel_auto_fit(state);
+    if (state.auto_fit_job.worker.joinable()) {
+        state.auto_fit_job.worker.join();
+    }
     shutdown_imgui();
     destroy_chrome_cursors(chrome_cursors);
     glfwDestroyWindow(window);
