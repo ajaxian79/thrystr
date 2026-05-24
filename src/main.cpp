@@ -924,6 +924,7 @@ WaveFitResult score_wave_on_range(const AppState& state,
     const double tolerance = std::max(0.000001, static_cast<double>(state.wave_tolerance));
     const std::size_t stride = fit_sample_stride(first, last);
     double error = 0.0;
+    // Intersections only count at discrete data samples; drawn data lines are visual guides.
     for (std::size_t index = first; index <= last && index < state.analysis->scalars.size();
          index += stride) {
         const double x_nm = static_cast<double>(index) * period;
@@ -1053,7 +1054,7 @@ void create_interpolated_wave(AppState& state) {
         analysis_selection_bounds(state).second);
     state.status = "Created interpolated wave: " +
                    format_count(final_fit.hits) + "/" +
-                   format_count(final_fit.tested) + " hits, " +
+                   format_count(final_fit.tested) + " point hits, " +
                    format_count(wave.wave.wavelength_modifiers.size()) + " wavelength keys";
 }
 
@@ -1993,7 +1994,7 @@ void draw_entity_toolbox(AppState& state) {
                 score_wave_on_range(state, selected->wave, first, last);
             state.status = "Fitted " + selected->name + ": " +
                            format_count(final_fit.hits) + "/" +
-                           format_count(final_fit.tested) + " hits, " +
+                           format_count(final_fit.tested) + " point hits, " +
                            format_count(selected->wave.wavelength_modifiers.size()) +
                            " wavelength keys";
         }
@@ -2017,6 +2018,70 @@ float plot_x_step(const AppState& state) {
         static_cast<float>(std::clamp(data_spatial_period_nm(state), 0.000001, 1.0e6));
     const float zoom = std::max(0.01f, std::abs(state.zoom_x));
     return std::max(0.05f, point_spacing * slope_scale * zoom);
+}
+
+void draw_data_point_markers(ImDrawList* draw,
+                             const thrystr::Analysis& analysis,
+                             std::size_t first,
+                             std::size_t last,
+                             float plot_left,
+                             float plot_top,
+                             float plot_bottom,
+                             float x_step,
+                             float y_zoom,
+                             const ImVec2& clip_min,
+                             const ImVec2& clip_max) {
+    if (!draw || analysis.scalars.empty() || last < first) {
+        return;
+    }
+
+    const std::size_t count = analysis.scalars.size();
+    if (x_step >= 3.0f) {
+        for (std::size_t i = first; i <= last && i < count; ++i) {
+            const ImVec2 point(plot_left + static_cast<float>(i) * x_step,
+                               y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom));
+            draw->AddCircleFilled(point, 2.2f, IM_COL32(238, 241, 245, 235));
+        }
+        return;
+    }
+
+    const int column_count =
+        std::max(1, static_cast<int>(std::ceil(std::max(1.0f, clip_max.x - clip_min.x))));
+    std::vector<float> min_y(static_cast<std::size_t>(column_count), FLT_MAX);
+    std::vector<float> max_y(static_cast<std::size_t>(column_count), -FLT_MAX);
+
+    for (std::size_t i = first; i <= last && i < count; ++i) {
+        const float x = plot_left + static_cast<float>(i) * x_step;
+        if (x < clip_min.x || x > clip_max.x) {
+            continue;
+        }
+        const int column = std::clamp(static_cast<int>(std::floor(x - clip_min.x)),
+                                      0,
+                                      column_count - 1);
+        const float y = y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom);
+        min_y[static_cast<std::size_t>(column)] =
+            std::min(min_y[static_cast<std::size_t>(column)], y);
+        max_y[static_cast<std::size_t>(column)] =
+            std::max(max_y[static_cast<std::size_t>(column)], y);
+    }
+
+    for (int column = 0; column < column_count; ++column) {
+        const std::size_t index = static_cast<std::size_t>(column);
+        if (min_y[index] == FLT_MAX) {
+            continue;
+        }
+        const float x = clip_min.x + static_cast<float>(column) + 0.5f;
+        if (std::abs(max_y[index] - min_y[index]) < 1.0f) {
+            draw->AddRectFilled(ImVec2(x - 0.5f, min_y[index] - 0.5f),
+                                ImVec2(x + 0.5f, min_y[index] + 0.5f),
+                                IM_COL32(238, 241, 245, 220));
+        } else {
+            draw->AddLine(ImVec2(x, min_y[index]),
+                          ImVec2(x, max_y[index]),
+                          IM_COL32(238, 241, 245, 185),
+                          1.0f);
+        }
+    }
 }
 
 void draw_plot(AppState& state) {
@@ -2221,14 +2286,6 @@ void draw_plot(AppState& state) {
             draw->AddLine(a, b, IM_COL32(90, 142, 210, 235), 1.2f);
         }
     }
-    if (draw_data && state.show_points && x_step >= 3.0f) {
-        for (std::size_t i = first; i <= last && i < count; ++i) {
-            const ImVec2 point(plot_left + static_cast<float>(i) * x_step,
-                               y_for_value(analysis.scalars[i], plot_top, plot_bottom, y_zoom));
-            draw->AddCircleFilled(point, 2.0f, IM_COL32(230, 232, 235, 220));
-        }
-    }
-
     static constexpr std::array<ImU32, 6> kWaveColors = {
         IM_COL32(214, 160, 63, 220),
         IM_COL32(74, 160, 104, 220),
@@ -2264,6 +2321,20 @@ void draw_plot(AppState& state) {
             previous = point;
             has_previous = true;
         }
+    }
+
+    if (draw_data && state.show_points) {
+        draw_data_point_markers(draw,
+                                analysis,
+                                first,
+                                last,
+                                plot_left,
+                                plot_top,
+                                plot_bottom,
+                                x_step,
+                                y_zoom,
+                                clip_min,
+                                clip_max);
     }
 
     draw->AddRect(ImVec2(plot_left, plot_top), ImVec2(plot_right, plot_bottom),
