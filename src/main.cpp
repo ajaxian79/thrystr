@@ -96,6 +96,7 @@ constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
 constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
 constexpr std::uint32_t kMaxWaveSettingsMaskBytes = 512u * 1024u * 1024u;
 constexpr std::size_t kAutoFitMaxSamples = 65536u;
+constexpr std::size_t kAutoFitActivityMaxItems = 240u;
 constexpr std::size_t kMaxFitValidationIssues = 512u;
 constexpr std::uint8_t kTrackAutoFitMinDataTracks = 2u;
 constexpr std::uint8_t kTrackAutoFitMaxDataTracks =
@@ -231,8 +232,30 @@ struct AutoFitJob {
     std::size_t total_samples = 0;
     std::size_t completed_segments = 0;
     std::size_t total_segments = 0;
+    std::size_t active_segment_index = 0;
+    std::size_t active_segment_start = 0;
+    std::size_t active_segment_length = 0;
     std::string progress_label;
+    std::string active_operation;
+    std::vector<std::string> activity_log;
     std::string error;
+};
+
+struct AutoFitProgressSnapshot {
+    bool running = false;
+    bool multi_track = false;
+    bool cancelled = false;
+    std::size_t processed_samples = 0;
+    std::size_t total_samples = 0;
+    std::size_t completed_segments = 0;
+    std::size_t total_segments = 0;
+    std::size_t active_segment_index = 0;
+    std::size_t active_segment_start = 0;
+    std::size_t active_segment_length = 0;
+    std::string progress_label;
+    std::string active_operation;
+    std::string error;
+    std::vector<std::string> activity_log;
 };
 
 struct Args {
@@ -2130,11 +2153,88 @@ const char* encoding_target_label(double ratio) {
     return "over target";
 }
 
+void append_auto_fit_activity_locked(AutoFitJob& job, std::string message) {
+    job.activity_log.push_back(std::move(message));
+    if (job.activity_log.size() > kAutoFitActivityMaxItems) {
+        job.activity_log.erase(
+            job.activity_log.begin(),
+            job.activity_log.begin() +
+                static_cast<std::ptrdiff_t>(job.activity_log.size() - kAutoFitActivityMaxItems));
+    }
+}
+
+void append_auto_fit_activity(AutoFitJob& job, std::string message) {
+    std::scoped_lock lock(job.result_mutex);
+    append_auto_fit_activity_locked(job, std::move(message));
+}
+
+void store_auto_fit_stage(AutoFitJob& job, std::size_t segment_index,
+                          const TrackAutoFitRange& range, std::string operation,
+                          bool append_log = true) {
+    std::scoped_lock lock(job.result_mutex);
+    job.active_segment_index = segment_index;
+    job.active_segment_start = range.start;
+    job.active_segment_length = range.length;
+    job.active_operation = std::move(operation);
+    job.progress_label = "segment " + format_count(segment_index + 1u) + "/" +
+                         format_count(std::max<std::size_t>(1u, job.total_segments));
+    if (append_log) {
+        append_auto_fit_activity_locked(job, job.progress_label + ": " + job.active_operation +
+                                                 " [" + format_count(range.start) + ".." +
+                                                 format_count(range.start + range.length - 1u) +
+                                                 "]");
+    }
+    job.partial_dirty = true;
+}
+
+void clear_auto_fit_activity(AutoFitJob& job) {
+    job.active_segment_index = 0u;
+    job.active_segment_start = 0u;
+    job.active_segment_length = 0u;
+    job.progress_label.clear();
+    job.active_operation.clear();
+    job.activity_log.clear();
+}
+
+std::size_t workspace_section_count(const thrystr::app::WorkspaceModel& workspace) {
+    std::size_t count = 0u;
+    for (const thrystr::app::Track& track : workspace.tracks) {
+        count += track.sections.size();
+    }
+    return count;
+}
+
+AutoFitProgressSnapshot auto_fit_progress_snapshot(AppState& state) {
+    AutoFitProgressSnapshot snapshot;
+    AutoFitJob& job = state.auto_fit_job;
+    snapshot.running = job.running.load();
+    std::scoped_lock lock(job.result_mutex);
+    snapshot.multi_track = job.multi_track;
+    snapshot.cancelled = job.cancelled;
+    snapshot.processed_samples = job.processed_samples;
+    snapshot.total_samples = job.total_samples;
+    snapshot.completed_segments = job.completed_segments;
+    snapshot.total_segments = job.total_segments;
+    snapshot.active_segment_index = job.active_segment_index;
+    snapshot.active_segment_start = job.active_segment_start;
+    snapshot.active_segment_length = job.active_segment_length;
+    snapshot.progress_label = job.progress_label;
+    snapshot.active_operation = job.active_operation;
+    snapshot.error = job.error;
+    snapshot.activity_log = job.activity_log;
+    return snapshot;
+}
+
 void store_single_track_job_result(AutoFitJob& job, thrystr::app::ConvergentFitResult fit) {
     const bool cancelled = fit.cancelled;
     std::scoped_lock lock(job.result_mutex);
     job.sections = std::move(fit.sections);
     job.cancelled = cancelled;
+    job.processed_samples = job.total_samples;
+    job.completed_segments = job.total_segments == 0u ? 1u : job.total_segments;
+    job.active_operation = cancelled ? "cancelled" : "result ready";
+    append_auto_fit_activity_locked(job, cancelled ? "Single-track fit cancelled"
+                                                   : "Single-track fit result ready");
 }
 
 void store_segment_fit_patch(AutoFitJob& job, SegmentFitPatch patch) {
@@ -2145,6 +2245,10 @@ void store_segment_fit_patch(AutoFitJob& job, SegmentFitPatch patch) {
     job.cancelled = job.cancelled || patch.cancelled;
     job.progress_label = "segment " + format_count(job.completed_segments) + "/" +
                          format_count(std::max<std::size_t>(1u, job.total_segments));
+    job.active_operation = "published fitted curves";
+    append_auto_fit_activity_locked(
+        job, job.progress_label + ": published " +
+                 format_count(workspace_section_count(patch.workspace)) + " sections");
     job.pending_patches.push_back(std::move(patch));
     job.partial_dirty = true;
 }
@@ -2152,6 +2256,7 @@ void store_segment_fit_patch(AutoFitJob& job, SegmentFitPatch patch) {
 void store_auto_fit_job_error(AutoFitJob& job, std::string message) {
     std::scoped_lock lock(job.result_mutex);
     job.error = std::move(message);
+    append_auto_fit_activity_locked(job, "error: " + job.error);
 }
 
 thrystr::app::ValidationReport validate_fitted_sections(AppState& state) {
@@ -2232,6 +2337,7 @@ void run_track_auto_fit_worker(AutoFitJob& job, std::filesystem::path source_pat
                                double spacing_nm, std::size_t max_section_length,
                                std::uint8_t sample_bits) {
     try {
+        append_auto_fit_activity(job, "opening source stream: " + source_path.filename().string());
         std::ifstream input(source_path, std::ios::binary);
         if (!input) {
             throw std::runtime_error("could not open file: " + source_path.string());
@@ -2241,16 +2347,21 @@ void run_track_auto_fit_worker(AutoFitJob& job, std::filesystem::path source_pat
             if (job.cancel_requested.load()) {
                 std::scoped_lock lock(job.result_mutex);
                 job.cancelled = true;
+                append_auto_fit_activity_locked(job, "cancel requested before next segment");
                 break;
             }
 
             const TrackAutoFitRange& range = ranges[segment_index];
+            store_auto_fit_stage(job, segment_index, range, "loading source samples");
             std::vector<thrystr::app::Scalar> samples =
                 load_track_auto_fit_scalars(input, source_path, mappers, range, sample_bits);
             if (samples.empty()) {
+                store_auto_fit_stage(job, segment_index, range, "skipped empty source range");
                 continue;
             }
 
+            store_auto_fit_stage(job, segment_index, range,
+                                 "partitioning tracks and fitting waves");
             thrystr::app::MultiTrackOptions track_options;
             track_options.tolerance = tolerance;
             track_options.default_spacing_nm = spacing_nm;
@@ -2267,9 +2378,11 @@ void run_track_auto_fit_worker(AutoFitJob& job, std::filesystem::path source_pat
             if (fit.cancelled) {
                 std::scoped_lock lock(job.result_mutex);
                 job.cancelled = true;
+                append_auto_fit_activity_locked(job, "cancelled while fitting current segment");
                 break;
             }
 
+            store_auto_fit_stage(job, segment_index, range, "validating fitted reconstruction");
             thrystr::app::ValidationReport validation =
                 thrystr::app::validate_tracks(samples, fit.workspace, track_options.parity_margin);
             SegmentFitPatch patch;
@@ -2282,6 +2395,7 @@ void run_track_auto_fit_worker(AutoFitJob& job, std::filesystem::path source_pat
             patch.cancelled = fit.cancelled;
             store_segment_fit_patch(job, std::move(patch));
         }
+        append_auto_fit_activity(job, "track auto-fit worker finished");
     } catch (const std::exception& error) {
         store_auto_fit_job_error(job, error.what());
     }
@@ -2300,6 +2414,7 @@ void apply_auto_fit_partial_if_ready(AppState& state) {
     std::size_t completed_segments = 0u;
     std::size_t total_segments = 0u;
     std::string progress_label;
+    std::string active_operation;
     bool cancelled = false;
     {
         std::scoped_lock lock(job.result_mutex);
@@ -2314,6 +2429,7 @@ void apply_auto_fit_partial_if_ready(AppState& state) {
         completed_segments = job.completed_segments;
         total_segments = job.total_segments;
         progress_label = job.progress_label;
+        active_operation = job.active_operation;
         cancelled = job.cancelled;
     }
 
@@ -2330,6 +2446,9 @@ void apply_auto_fit_partial_if_ready(AppState& state) {
     state.status = "Track auto-fit building " +
                    (progress_label.empty() ? std::string("segments") : progress_label) + ": " +
                    format_count(processed_samples) + "/" + format_count(total_samples) + " samples";
+    if (!active_operation.empty()) {
+        state.status += ", " + active_operation;
+    }
     if (total_segments > 0u) {
         state.status += " (" + format_count(completed_segments) + "/" +
                         format_count(total_segments) + " segments)";
@@ -2372,7 +2491,11 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
     job.total_samples = 0u;
     job.completed_segments = 0u;
     job.total_segments = 0u;
+    job.active_segment_index = 0u;
+    job.active_segment_start = 0u;
+    job.active_segment_length = 0u;
     job.progress_label.clear();
+    job.active_operation.clear();
     job.error.clear();
     {
         std::scoped_lock lock(job.result_mutex);
@@ -2380,6 +2503,7 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
         job.workspace = {};
         job.validation = {};
         job.pending_patches.clear();
+        clear_auto_fit_activity(job);
     }
 
     const double tolerance = std::max(1.0e-9, static_cast<double>(state.wave_tolerance));
@@ -2419,6 +2543,10 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
         job.total_samples = count;
         job.total_segments = ranges.size();
         job.progress_label = "segment 0/" + format_count(ranges.size());
+        job.active_operation = "queued";
+        append_auto_fit_activity(job, "track auto-fit queued: " + format_count(count) +
+                                          " samples across " + format_count(ranges.size()) +
+                                          " segments");
         state.status =
             "Track auto-fit segmenting whole file: 0/" + format_count(ranges.size()) + " segments";
 
@@ -2454,10 +2582,22 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
     job.requested_last = requested_last;
     job.capped_last = capped_last;
     job.total_samples = scalars.size();
+    job.total_segments = 1u;
+    job.active_segment_start = first;
+    job.active_segment_length = scalars.size();
+    job.progress_label = "single section fit";
+    job.active_operation = "queued";
+    append_auto_fit_activity(job, "single-track auto-fit queued: " + format_count(scalars.size()) +
+                                      " samples");
 
     state.status = "Auto-fit running on " + format_count(scalars.size()) + " samples";
     job.worker = std::thread([&job, samples = std::move(scalars), options]() mutable {
         try {
+            {
+                std::scoped_lock lock(job.result_mutex);
+                job.active_operation = "fitting single-track sections";
+                append_auto_fit_activity_locked(job, "fitting single-track sections");
+            }
             options.cancel_requested = &job.cancel_requested;
             const thrystr::app::ConvergentFitResult fit =
                 thrystr::app::fit_convergent_sections(samples, options);
@@ -3708,6 +3848,100 @@ void draw_fit_validation_overlay(AppState& state) {
     ImGui::End();
 }
 
+void draw_activity_spinner(float radius, ImU32 color) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const ImVec2 center(pos.x + radius, pos.y + radius);
+    const double time = ImGui::GetTime();
+    for (int i = 0; i < 12; ++i) {
+        const float t = static_cast<float>(i) / 12.0f;
+        const float angle = static_cast<float>(time * 6.0 + static_cast<double>(i) * 0.523599);
+        const float alpha = 0.18f + 0.82f * t;
+        const float x = center.x + std::cos(angle) * radius * 0.62f;
+        const float y = center.y + std::sin(angle) * radius * 0.62f;
+        draw->AddCircleFilled(ImVec2(x, y), 2.4f, skald::tokens::with_alpha(color, alpha), 12);
+    }
+    ImGui::Dummy(ImVec2(radius * 2.0f, radius * 2.0f));
+}
+
+void draw_auto_fit_activity_dialog(AppState& state) {
+    const AutoFitProgressSnapshot progress = auto_fit_progress_snapshot(state);
+    if (!progress.running) {
+        return;
+    }
+
+    const ImVec2 viewport = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(
+        ImVec2(std::max(24.0f, viewport.x - kToolboxWidth - 456.0f), kTopChromeHeight + 24.0f),
+        ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 360.0f), ImGuiCond_Appearing);
+    if (!ImGui::Begin("Auto-Fit Activity", nullptr,
+                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::BeginGroup();
+    draw_activity_spinner(14.0f, skald::tokens::status::info);
+    ImGui::EndGroup();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextUnformatted(progress.multi_track ? "Auto-Fit Tracks" : "Auto-Fit All");
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
+                       progress.active_operation.empty() ? "working"
+                                                         : progress.active_operation.c_str());
+    ImGui::EndGroup();
+
+    const float ratio = progress.total_samples == 0u
+                            ? 0.0f
+                            : std::clamp(static_cast<float>(progress.processed_samples) /
+                                             static_cast<float>(progress.total_samples),
+                                         0.0f, 1.0f);
+    ImGui::ProgressBar(ratio, ImVec2(-FLT_MIN, 0.0f));
+    if (progress.total_segments > 0u) {
+        skald::KvRow("segment", "%s/%s", format_count(progress.completed_segments).c_str(),
+                     format_count(progress.total_segments).c_str());
+        skald::KvRow("active", "%s/%s", format_count(progress.active_segment_index + 1u).c_str(),
+                     format_count(progress.total_segments).c_str());
+    }
+    if (progress.total_samples > 0u) {
+        skald::KvRow("samples", "%s/%s", format_count(progress.processed_samples).c_str(),
+                     format_count(progress.total_samples).c_str());
+    }
+    if (progress.active_segment_length > 0u) {
+        skald::KvRow(
+            "range", "%s..%s", format_count(progress.active_segment_start).c_str(),
+            format_count(progress.active_segment_start + progress.active_segment_length - 1u)
+                .c_str());
+    }
+    if (skald::GhostButton("Cancel Fit", ImVec2(112.0f, 0.0f))) {
+        cancel_auto_fit(state);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    skald::SectionHeader("Operations");
+    if (ImGui::BeginChild("##auto_fit_activity_log", ImVec2(0.0f, 0.0f), true,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
+        if (state.fonts.mono) {
+            ImGui::PushFont(state.fonts.mono);
+        }
+        for (const std::string& line : progress.activity_log) {
+            ImGui::TextUnformatted(line.c_str());
+        }
+        if (progress.activity_log.empty()) {
+            ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
+                               "waiting for worker activity");
+        } else {
+            ImGui::SetScrollHereY(1.0f);
+        }
+        if (state.fonts.mono) {
+            ImGui::PopFont();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 StartupAction draw_splash(AppState& state) {
     if (!state.splash_open) {
         return StartupAction::None;
@@ -3905,12 +4139,21 @@ void draw_entity_toolbox(AppState& state) {
                     std::size_t total_segments = 0u;
                     std::size_t processed_samples = 0u;
                     std::size_t total_samples = 0u;
+                    std::size_t active_start = 0u;
+                    std::size_t active_length = 0u;
+                    std::string active_operation;
                     {
                         std::scoped_lock lock(state.auto_fit_job.result_mutex);
                         completed_segments = state.auto_fit_job.completed_segments;
                         total_segments = state.auto_fit_job.total_segments;
                         processed_samples = state.auto_fit_job.processed_samples;
                         total_samples = state.auto_fit_job.total_samples;
+                        active_start = state.auto_fit_job.active_segment_start;
+                        active_length = state.auto_fit_job.active_segment_length;
+                        active_operation = state.auto_fit_job.active_operation;
+                    }
+                    if (!active_operation.empty()) {
+                        skald::KvRow("operation", "%s", active_operation.c_str());
                     }
                     if (total_segments > 0u) {
                         const std::string segment_text =
@@ -3921,6 +4164,10 @@ void draw_entity_toolbox(AppState& state) {
                         const std::string sample_text =
                             format_count(processed_samples) + "/" + format_count(total_samples);
                         skald::KvRow("samples", "%s", sample_text.c_str());
+                    }
+                    if (active_length > 0u) {
+                        skald::KvRow("active range", "%s..%s", format_count(active_start).c_str(),
+                                     format_count(active_start + active_length - 1u).c_str());
                     }
                 } else if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
                     auto_fit_current_range(state);
@@ -4459,6 +4706,61 @@ void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t firs
     }
 }
 
+void draw_auto_fit_progress_overlay(ImDrawList* draw, const AutoFitProgressSnapshot& progress,
+                                    std::size_t first, std::size_t last, float plot_left,
+                                    float plot_top, float plot_bottom, float x_step,
+                                    const ImVec2& clip_min, const ImVec2& clip_max) {
+    if (!draw || !progress.running) {
+        return;
+    }
+
+    const float bar_left = clip_min.x + 58.0f;
+    const float bar_right = clip_max.x - 24.0f;
+    const float bar_top = plot_top - 20.0f;
+    const float bar_bottom = plot_top - 10.0f;
+    if (bar_right > bar_left && bar_bottom > clip_min.y) {
+        const float ratio = progress.total_samples == 0u
+                                ? 0.0f
+                                : std::clamp(static_cast<float>(progress.processed_samples) /
+                                                 static_cast<float>(progress.total_samples),
+                                             0.0f, 1.0f);
+        draw->AddRectFilled(ImVec2(bar_left, bar_top), ImVec2(bar_right, bar_bottom),
+                            skald::tokens::surface::control_hi, skald::tokens::radii::pill);
+        draw->AddRectFilled(ImVec2(bar_left, bar_top),
+                            ImVec2(bar_left + (bar_right - bar_left) * ratio, bar_bottom),
+                            skald::tokens::status::info, skald::tokens::radii::pill);
+        const std::string label =
+            (progress.progress_label.empty() ? std::string("auto-fit") : progress.progress_label) +
+            "  " + format_count(progress.processed_samples) + "/" +
+            format_count(progress.total_samples) + " samples";
+        draw->AddText(ImVec2(bar_left, bar_top - 17.0f), skald::tokens::ink::muted, label.c_str());
+    }
+
+    if (progress.active_segment_length == 0u || last < first) {
+        return;
+    }
+    const std::size_t active_first = progress.active_segment_start;
+    const std::size_t active_last =
+        progress.active_segment_start + progress.active_segment_length - 1u;
+    if (active_last < first || active_first > last) {
+        return;
+    }
+
+    const std::size_t visible_first = std::max(first, active_first);
+    const std::size_t visible_last = std::min(last, active_last);
+    const float x0 = plot_left + static_cast<float>(visible_first) * x_step;
+    const float x1 = plot_left + static_cast<float>(visible_last) * x_step;
+    const ImU32 fill = skald::tokens::with_alpha(skald::tokens::status::info, 42.0f / 255.0f);
+    const ImU32 edge = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
+    draw->AddRectFilled(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), fill);
+    draw->AddRect(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), edge, 0.0f, 0, 1.8f);
+
+    const std::string operation =
+        progress.active_operation.empty() ? std::string("working") : progress.active_operation;
+    draw->AddText(ImVec2(std::max(x0 + 8.0f, clip_min.x + 64.0f), plot_top + 10.0f), edge,
+                  operation.c_str());
+}
+
 void draw_fitted_sections(ImDrawList* draw, const AppState& state, std::size_t first,
                           std::size_t last, float plot_left, float plot_top, float plot_bottom,
                           float x_step, float y_zoom) {
@@ -4817,6 +5119,7 @@ void draw_plot(AppState& state) {
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(clip_min, clip_max, true);
     draw->AddRectFilled(item_min, item_max, skald::tokens::surface::window);
+    const AutoFitProgressSnapshot fit_progress = auto_fit_progress_snapshot(state);
 
     const float label_x = child_pos.x + 8.0f;
     const float grid_x0 = child_pos.x + margin_left;
@@ -4864,6 +5167,9 @@ void draw_plot(AppState& state) {
         draw->AddCircleFilled(ImVec2(start_x, plot_top + 8.0f), 4.0f, kSelectionHandle);
         draw->AddCircleFilled(ImVec2(end_x, plot_top + 8.0f), 4.0f, kSelectionHandle);
     }
+
+    draw_auto_fit_progress_overlay(draw, fit_progress, first, last, plot_left, plot_top,
+                                   plot_bottom, x_step, clip_min, clip_max);
 
     if (plot_hovered && !playhead_scrub_claimed && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const std::size_t index = index_from_mouse();
@@ -5260,6 +5566,7 @@ void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors)
     draw_inspector_overlay(state);
     draw_settings_dialog(state);
     draw_fit_validation_overlay(state);
+    draw_auto_fit_activity_dialog(state);
     draw_docs_panel(state);
     draw_file_dialog(state);
     handle_custom_chrome(state, window, cursors);
