@@ -40,13 +40,15 @@ constexpr float kTopChromeHeight = 44.0f;
 constexpr double kChromeResizeMargin = 8.0;
 constexpr int kMinWindowWidth = 760;
 constexpr int kMinWindowHeight = 460;
+constexpr ImVec2 kFileDialogSize{720.0f, 520.0f};
+constexpr ImVec2 kSettingsDialogSize{420.0f, 320.0f};
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
 constexpr int kWaveFitPhaseSteps = 128;
 constexpr std::size_t kMaxWaveWavelengthModifiers = 16;
 constexpr int kWaveModifierWavelengthSteps = 41;
 constexpr std::uintmax_t kLargeSourcePhaseFitDeferBytes = 128ull * 1024ull * 1024ull;
-constexpr const char* kOpenFileDialogId = "##open_file_dialog";
+constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
 constexpr std::uint32_t kWaveSettingsVersion = 2;
@@ -124,6 +126,12 @@ enum class ChromeAction {
     ResizeTopRight,
     ResizeBottomLeft,
     ResizeBottomRight,
+};
+
+enum class WindowControl {
+    Minimize,
+    Maximize,
+    Close,
 };
 
 struct ChromeCursors {
@@ -377,6 +385,32 @@ GLFWcursor* cursor_for_action(const ChromeCursors& cursors, ChromeAction action)
 std::pair<double, double> global_cursor_position(GLFWwindow* window,
                                                  double cursor_x,
                                                  double cursor_y) {
+#if defined(THRYSTR_HAS_X11)
+    if (window && glfwGetPlatform() == GLFW_PLATFORM_X11) {
+        Display* display = glfwGetX11Display();
+        const Window xwindow = glfwGetX11Window(window);
+        if (display && xwindow != 0) {
+            Window root = 0;
+            Window child = 0;
+            int root_x = 0;
+            int root_y = 0;
+            int window_x = 0;
+            int window_y = 0;
+            unsigned int mask = 0;
+            if (XQueryPointer(display,
+                              xwindow,
+                              &root,
+                              &child,
+                              &root_x,
+                              &root_y,
+                              &window_x,
+                              &window_y,
+                              &mask)) {
+                return {static_cast<double>(root_x), static_cast<double>(root_y)};
+            }
+        }
+    }
+#endif
     int window_x = 0;
     int window_y = 0;
     glfwGetWindowPos(window, &window_x, &window_y);
@@ -408,6 +442,20 @@ void update_chrome_action(AppState& state,
     const int dy = static_cast<int>(std::lround(global_y - state.chrome_start_global_y));
 
     if (state.chrome_action == ChromeAction::Move) {
+#if defined(THRYSTR_HAS_X11)
+        if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
+            Display* display = glfwGetX11Display();
+            const Window xwindow = glfwGetX11Window(window);
+            if (display && xwindow != 0) {
+                XMoveWindow(display,
+                            xwindow,
+                            state.chrome_start_window_x + dx,
+                            state.chrome_start_window_y + dy);
+                XFlush(display);
+                return;
+            }
+        }
+#endif
         glfwSetWindowPos(window,
                          state.chrome_start_window_x + dx,
                          state.chrome_start_window_y + dy);
@@ -420,10 +468,8 @@ void update_chrome_action(AppState& state,
     int h = state.chrome_start_window_h;
 
     if (chrome_action_has_left(state.chrome_action)) {
-        x = state.chrome_start_window_x + dx;
         w = state.chrome_start_window_w - dx;
         if (w < kMinWindowWidth) {
-            x = state.chrome_start_window_x + state.chrome_start_window_w - kMinWindowWidth;
             w = kMinWindowWidth;
         }
     } else if (chrome_action_has_right(state.chrome_action)) {
@@ -431,37 +477,23 @@ void update_chrome_action(AppState& state,
     }
 
     if (chrome_action_has_top(state.chrome_action)) {
-        y = state.chrome_start_window_y + dy;
         h = state.chrome_start_window_h - dy;
         if (h < kMinWindowHeight) {
-            y = state.chrome_start_window_y + state.chrome_start_window_h - kMinWindowHeight;
             h = kMinWindowHeight;
         }
     } else if (chrome_action_has_bottom(state.chrome_action)) {
         h = std::max(kMinWindowHeight, state.chrome_start_window_h + dy);
     }
 
-    const bool position_changed = x != state.chrome_start_window_x ||
-                                  y != state.chrome_start_window_y;
-
 #if defined(THRYSTR_HAS_X11)
     if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
         Display* display = glfwGetX11Display();
         const Window xwindow = glfwGetX11Window(window);
         if (display && xwindow != 0) {
-            if (position_changed) {
-                XMoveResizeWindow(display,
-                                  xwindow,
-                                  x,
-                                  y,
-                                  static_cast<unsigned int>(w),
-                                  static_cast<unsigned int>(h));
-            } else {
-                XResizeWindow(display,
-                              xwindow,
-                              static_cast<unsigned int>(w),
-                              static_cast<unsigned int>(h));
-            }
+            XResizeWindow(display,
+                          xwindow,
+                          static_cast<unsigned int>(w),
+                          static_cast<unsigned int>(h));
             XFlush(display);
             return;
         }
@@ -469,9 +501,8 @@ void update_chrome_action(AppState& state,
 #endif
 
     glfwSetWindowSize(window, w, h);
-    if (position_changed) {
-        glfwSetWindowPos(window, x, y);
-    }
+    (void)x;
+    (void)y;
 }
 
 void handle_custom_chrome(AppState& state,
@@ -1377,6 +1408,85 @@ void request_file_dialog(AppState& state, DialogPurpose purpose) {
     state.pending_dialog = purpose;
 }
 
+bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = false) {
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          skald::tokens::to_vec4(accent ? ImGui::GetColorU32(
+                                                        ImGui::GetStyle().Colors[ImGuiCol_CheckMark])
+                                                      : skald::tokens::ink::primary));
+    const bool clicked = skald::IconButton(glyph, tooltip, 30.0f);
+    ImGui::PopStyleColor();
+    return clicked;
+}
+
+bool window_control_button(WindowControl control, const char* tooltip, GLFWwindow* window) {
+    const float size = 28.0f;
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const char* id = control == WindowControl::Minimize
+        ? "##window_minimize"
+        : control == WindowControl::Maximize ? "##window_maximize" : "##window_close";
+    ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    const bool clicked = ImGui::IsItemClicked();
+    auto* draw = ImGui::GetWindowDrawList();
+
+    const ImU32 fill = control == WindowControl::Close && hovered
+        ? skald::tokens::with_alpha(skald::tokens::status::destructive, active ? 0.70f : 0.52f)
+        : hovered ? skald::tokens::surface::control
+                  : IM_COL32(0, 0, 0, 0);
+    const ImU32 ink = hovered ? skald::tokens::ink::primary
+                              : skald::tokens::ink::muted;
+    draw->AddRectFilled(pos,
+                        ImVec2(pos.x + size, pos.y + size),
+                        fill,
+                        skald::tokens::radii::ctrl);
+
+    const ImVec2 center(pos.x + size * 0.5f, pos.y + size * 0.5f);
+    if (control == WindowControl::Minimize) {
+        draw->AddLine(ImVec2(center.x - 5.0f, center.y + 4.0f),
+                      ImVec2(center.x + 5.0f, center.y + 4.0f),
+                      ink,
+                      1.6f);
+    } else if (control == WindowControl::Maximize) {
+        const bool maximized = window && glfwGetWindowAttrib(window, GLFW_MAXIMIZED);
+        if (maximized) {
+            draw->AddRect(ImVec2(center.x - 3.0f, center.y - 5.0f),
+                          ImVec2(center.x + 5.0f, center.y + 3.0f),
+                          ink,
+                          0.0f,
+                          0,
+                          1.4f);
+            draw->AddRect(ImVec2(center.x - 6.0f, center.y - 2.0f),
+                          ImVec2(center.x + 2.0f, center.y + 6.0f),
+                          ink,
+                          0.0f,
+                          0,
+                          1.4f);
+        } else {
+            draw->AddRect(ImVec2(center.x - 5.0f, center.y - 5.0f),
+                          ImVec2(center.x + 5.0f, center.y + 5.0f),
+                          ink,
+                          0.0f,
+                          0,
+                          1.5f);
+        }
+    } else {
+        draw->AddLine(ImVec2(center.x - 5.0f, center.y - 5.0f),
+                      ImVec2(center.x + 5.0f, center.y + 5.0f),
+                      ink,
+                      1.6f);
+        draw->AddLine(ImVec2(center.x + 5.0f, center.y - 5.0f),
+                      ImVec2(center.x - 5.0f, center.y + 5.0f),
+                      ink,
+                      1.6f);
+    }
+
+    if (hovered && tooltip && tooltip[0] != '\0') {
+        skald::Tooltip(tooltip);
+    }
+    return clicked;
+}
+
 void draw_titlebar(AppState& state, GLFWwindow* window) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
@@ -1401,7 +1511,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
                   skald::tokens::border::separator,
                   1.0f);
 
-    ImGui::SetCursorPos(ImVec2(14.0f, 10.0f));
+    ImGui::SetCursorPos(ImVec2(16.0f, 10.0f));
     if (state.fonts.sans_md) {
         ImGui::PushFont(state.fonts.sans_md);
     }
@@ -1409,8 +1519,11 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     if (state.fonts.sans_md) {
         ImGui::PopFont();
     }
+    ImGui::SameLine(72.0f);
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
+                       "/ wave workspace");
 
-    ImGui::SameLine(96.0f);
+    ImGui::SameLine(188.0f);
     if (skald::GhostButton("File", ImVec2(52.0f, 0.0f))) {
         ImGui::OpenPopup("##file_menu");
     }
@@ -1418,13 +1531,13 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         if (ImGui::MenuItem("New Workspace")) {
             open_empty_workspace(state);
         }
-        if (ImGui::MenuItem("Load Source")) {
-            request_file_dialog(state, DialogPurpose::OpenSource);
-        }
-        if (ImGui::MenuItem("Load Wave Data")) {
+        if (ImGui::MenuItem("Open Workspace...")) {
             request_file_dialog(state, DialogPurpose::LoadWave);
         }
-        if (ImGui::MenuItem("Save Wave Data")) {
+        if (ImGui::MenuItem("Load Source...")) {
+            request_file_dialog(state, DialogPurpose::OpenSource);
+        }
+        if (ImGui::MenuItem("Save Wave Data...")) {
             request_file_dialog(state, DialogPurpose::SaveWave);
         }
         ImGui::Separator();
@@ -1432,6 +1545,19 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
             state.request_close = true;
         }
         ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+    if (toolbar_icon_button(skald::icons::kFile, "Load source data")) {
+        request_file_dialog(state, DialogPurpose::OpenSource);
+    }
+    ImGui::SameLine();
+    if (toolbar_icon_button(skald::icons::kFolder, "Load wave data")) {
+        request_file_dialog(state, DialogPurpose::LoadWave);
+    }
+    ImGui::SameLine();
+    if (toolbar_icon_button(skald::icons::kSave, "Save wave data")) {
+        request_file_dialog(state, DialogPurpose::SaveWave);
     }
 
     ImGui::SameLine();
@@ -1463,19 +1589,6 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     }
 
     ImGui::SameLine();
-    if (skald::AccentButton("Load Source", ImVec2(116.0f, 0.0f))) {
-        request_file_dialog(state, DialogPurpose::OpenSource);
-    }
-    ImGui::SameLine();
-    if (skald::GhostButton("Load Wave", ImVec2(104.0f, 0.0f))) {
-        request_file_dialog(state, DialogPurpose::LoadWave);
-    }
-    ImGui::SameLine();
-    if (skald::GhostButton("Save", ImVec2(62.0f, 0.0f))) {
-        request_file_dialog(state, DialogPurpose::SaveWave);
-    }
-
-    ImGui::SameLine();
     const std::string source_name = state.path[0] == '\0'
         ? std::string("source: none")
         : std::string("source: ") + std::filesystem::path(state.path).filename().string();
@@ -1487,12 +1600,12 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
                        state.status.c_str());
 
     const float controls_width = 96.0f;
-    ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 9.0f));
-    if (skald::IconButton("-", "Minimize", 26.0f)) {
+    ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 8.0f));
+    if (window_control_button(WindowControl::Minimize, "Minimize", window)) {
         glfwIconifyWindow(window);
     }
     ImGui::SameLine();
-    if (skald::IconButton("[]", "Maximize", 26.0f)) {
+    if (window_control_button(WindowControl::Maximize, "Maximize", window)) {
         if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
             glfwRestoreWindow(window);
         } else {
@@ -1500,7 +1613,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
         }
     }
     ImGui::SameLine();
-    if (skald::IconButton("x", "Close", 26.0f)) {
+    if (window_control_button(WindowControl::Close, "Close", window)) {
         state.request_close = true;
     }
 
@@ -1724,7 +1837,8 @@ void draw_settings_dialog(AppState& state) {
     }
 
     bool open = state.show_settings;
-    if (ImGui::BeginPopupModal("Settings", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::SetNextWindowSize(kSettingsDialogSize, ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Settings", &open, ImGuiWindowFlags_NoCollapse)) {
         skald::SectionHeader("Overlays");
         skald::PillToggle("Inspector overlay", &state.show_inspector_overlay);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -1759,10 +1873,11 @@ void draw_splash(AppState& state) {
     }
 
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(0.0f, kTopChromeHeight), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(viewport.x, std::max(120.0f, viewport.y - kTopChromeHeight)),
-                             ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 24.0f));
+    const float body_top = kTopChromeHeight;
+    const ImVec2 body_size(viewport.x, std::max(160.0f, viewport.y - body_top));
+    ImGui::SetNextWindowPos(ImVec2(0.0f, body_top), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(body_size, ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 26.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("##splash_host", nullptr,
                  ImGuiWindowFlags_NoDecoration |
@@ -1776,59 +1891,125 @@ void draw_splash(AppState& state) {
     const ImVec2 min = ImGui::GetWindowPos();
     const ImVec2 max(min.x + ImGui::GetWindowWidth(), min.y + ImGui::GetWindowHeight());
     draw->AddRectFilled(min, max, skald::tokens::surface::window);
+    draw->AddRectFilled(ImVec2(min.x, min.y),
+                        ImVec2(max.x, min.y + 160.0f),
+                        skald::tokens::surface::deep);
+    draw->AddLine(ImVec2(min.x, min.y + 160.0f),
+                  ImVec2(max.x, min.y + 160.0f),
+                  skald::tokens::border::separator,
+                  1.0f);
 
-    const float content_width = ImGui::GetContentRegionAvail().x;
-    const float actions_width = std::min(360.0f, std::max(280.0f, content_width * 0.34f));
-    const float right_width = std::max(240.0f, content_width - actions_width - 28.0f);
+    const float content_w = std::min(940.0f, std::max(320.0f, body_size.x - 56.0f));
+    const float content_x = min.x + std::max(28.0f, (body_size.x - content_w) * 0.5f);
+    const float header_y = min.y + 46.0f;
 
-    ImGui::BeginGroup();
-    if (state.fonts.sans_md) {
+    ImGui::SetCursorScreenPos(ImVec2(content_x, header_y));
+    if (state.fonts.hero) {
+        ImGui::PushFont(state.fonts.hero);
+    } else if (state.fonts.sans_md) {
         ImGui::PushFont(state.fonts.sans_md);
     }
     ImGui::TextUnformatted("thrystr");
-    if (state.fonts.sans_md) {
+    if (state.fonts.hero || state.fonts.sans_md) {
         ImGui::PopFont();
     }
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
                        "Scalar wave workspace");
-    ImGui::Dummy(ImVec2(0.0f, 18.0f));
-    skald::SectionHeader("Workspace");
-    if (skald::AccentButton("New workspace", ImVec2(actions_width, 0.0f))) {
-        open_empty_workspace(state);
-        ImGui::EndGroup();
-        ImGui::End();
-        return;
-    }
-    if (skald::GhostButton("Open workspace", ImVec2(actions_width, 0.0f))) {
-        request_file_dialog(state, DialogPurpose::LoadWave);
-        ImGui::EndGroup();
-        ImGui::End();
-        return;
-    }
-    if (skald::GhostButton("Load source", ImVec2(actions_width, 0.0f))) {
-        request_file_dialog(state, DialogPurpose::OpenSource);
-        ImGui::EndGroup();
-        ImGui::End();
-        return;
-    }
-    ImGui::EndGroup();
 
-    ImGui::SameLine(0.0f, 28.0f);
-    ImGui::BeginGroup();
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, skald::tokens::to_vec4(skald::tokens::surface::panel));
-    ImGui::BeginChild("##splash_recent", ImVec2(right_width, 270.0f),
-                      ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_NoScrollbar);
-    ImGui::PopStyleColor();
+    const float column_gap = 44.0f;
+    const bool stacked = content_w < 720.0f;
+    const float column_w = stacked ? content_w : (content_w - column_gap) * 0.5f;
+    const float left_x = content_x;
+    const float right_x = stacked ? content_x : content_x + column_w + column_gap;
+    const float start_y = min.y + 210.0f;
+    const float second_y = stacked ? start_y + 168.0f : start_y;
+
+    ImGui::SetCursorScreenPos(ImVec2(left_x, start_y));
     skald::SectionHeader("Recent");
-    skald::KvRowStatus("workspaces", "none", skald::BadgeTone::Muted);
-    skald::KvRowStatus("source", "none loaded", skald::BadgeTone::Muted);
-    ImGui::Dummy(ImVec2(0.0f, 14.0f));
-    skald::SectionHeader("Entities");
-    skald::KvRowStatus("data", "empty", skald::BadgeTone::Muted);
-    skald::KvRowStatus("waves", "0", skald::BadgeTone::Muted);
-    ImGui::EndChild();
-    ImGui::EndGroup();
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::dim),
+                       "No recent workspace");
+    ImGui::Dummy(ImVec2(column_w, 20.0f));
+
+    ImGui::SetCursorScreenPos(ImVec2(right_x, second_y));
+    skald::SectionHeader("Workspace");
+    const ImVec2 action_size(column_w, 34.0f);
+    auto action_row = [&](const char* id,
+                          const char* icon,
+                          const char* label,
+                          const char* shortcut,
+                          const char* tooltip,
+                          ImVec2 pos,
+                          bool primary) {
+        ImGui::SetCursorScreenPos(pos);
+        ImGui::InvisibleButton(id, action_size);
+        const bool hovered = ImGui::IsItemHovered();
+        const bool active = ImGui::IsItemActive();
+        const bool clicked = ImGui::IsItemClicked();
+        const ImU32 fill = active ? skald::tokens::surface::control_act
+            : hovered ? skald::tokens::surface::control_hi
+                      : primary ? skald::tokens::surface::control
+                                : skald::tokens::surface::panel;
+        const ImU32 border = primary ? skald::tokens::border::strong
+                                     : skald::tokens::border::default_;
+        draw->AddRectFilled(pos,
+                            ImVec2(pos.x + action_size.x, pos.y + action_size.y),
+                            fill,
+                            skald::tokens::radii::ctrl);
+        draw->AddRect(pos,
+                      ImVec2(pos.x + action_size.x, pos.y + action_size.y),
+                      border,
+                      skald::tokens::radii::ctrl,
+                      0,
+                      1.0f);
+
+        char text[160] = {};
+        std::snprintf(text, sizeof(text), "%s  %s", icon, label);
+        draw->AddText(ImVec2(pos.x + 14.0f, pos.y + 9.0f),
+                      skald::tokens::ink::primary,
+                      text);
+        if (shortcut && shortcut[0] != '\0') {
+            const ImVec2 shortcut_size = ImGui::CalcTextSize(shortcut);
+            draw->AddText(ImVec2(pos.x + action_size.x - shortcut_size.x - 14.0f,
+                                 pos.y + 9.0f),
+                          skald::tokens::ink::dim,
+                          shortcut);
+        }
+        if (hovered && tooltip && tooltip[0] != '\0') {
+            skald::Tooltip(tooltip);
+        }
+        return clicked;
+    };
+
+    float action_y = second_y + 28.0f;
+    if (action_row("##splash_new_workspace",
+                   skald::icons::kPlus,
+                   "New workspace",
+                   "Ctrl+N",
+                   "Create an empty workspace",
+                   ImVec2(right_x, action_y),
+                   true)) {
+        open_empty_workspace(state);
+    }
+    action_y += action_size.y + 8.0f;
+    if (action_row("##splash_open_workspace",
+                   skald::icons::kFolder,
+                   "Open workspace",
+                   "",
+                   "Load saved wave data",
+                   ImVec2(right_x, action_y),
+                   false)) {
+        request_file_dialog(state, DialogPurpose::LoadWave);
+    }
+    action_y += action_size.y + 8.0f;
+    if (action_row("##splash_load_source",
+                   skald::icons::kFile,
+                   "Load source",
+                   "",
+                   "Load a source data file",
+                   ImVec2(right_x, action_y),
+                   false)) {
+        request_file_dialog(state, DialogPurpose::OpenSource);
+    }
 
     ImGui::End();
 }
@@ -2378,11 +2559,134 @@ void navigate_file_dialog_selection(AppState& state) {
     refresh_file_dialog_entries(state);
 }
 
+const char* file_dialog_popup_label(DialogPurpose purpose) {
+    switch (purpose) {
+    case DialogPurpose::OpenSource:
+        return "Load Source###thrystr_file_dialog";
+    case DialogPurpose::LoadWave:
+        return "Open Workspace###thrystr_file_dialog";
+    case DialogPurpose::SaveWave:
+        return "Save Wave Data###thrystr_file_dialog";
+    case DialogPurpose::None:
+        break;
+    }
+    return kFileDialogStableId;
+}
+
+skald::FileDialogResult begin_chromed_file_dialog(
+    DialogPurpose purpose,
+    skald::FileDialogMode mode,
+    skald::FileDialogState& dialog,
+    std::span<const skald::FileDialogEntry> entries) {
+    skald::FileDialogResult out = skald::FileDialogResult::None;
+    ImGui::SetNextWindowSize(kFileDialogSize, ImGuiCond_Appearing);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,
+                          skald::tokens::to_vec4(skald::tokens::surface::panel));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 14.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::modal);
+    if (!ImGui::BeginPopupModal(file_dialog_popup_label(purpose),
+                                nullptr,
+                                ImGuiWindowFlags_NoCollapse)) {
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        return out;
+    }
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+
+    skald::SectionHeader(mode == skald::FileDialogMode::Open ? "Open" : "Save");
+
+    const float btn_w = 30.0f;
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+                          skald::tokens::to_vec4(skald::tokens::surface::input));
+    ImGui::SetNextItemWidth(-(190.0f + btn_w + 12.0f));
+    ImGui::InputTextWithHint("##cwd", "path", dialog.cwd, sizeof dialog.cwd);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(190.0f);
+    ImGui::InputTextWithHint("##filter", "filter", dialog.filter, sizeof dialog.filter);
+    ImGui::SameLine();
+    skald::IconButton(skald::icons::kCog, "Folder options", btn_w);
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    const float listing_h = std::max(220.0f, ImGui::GetContentRegionAvail().y - 92.0f);
+    if (ImGui::BeginTable("##fdlist",
+                          3,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerH |
+                              ImGuiTableFlags_ScrollY,
+                          ImVec2(0.0f, listing_h))) {
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+            const skald::FileDialogEntry& entry = entries[static_cast<std::size_t>(i)];
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            const bool selected = i == dialog.row_sel;
+            char row_label[320] = {};
+            std::snprintf(row_label,
+                          sizeof(row_label),
+                          "%s  %.*s",
+                          entry.is_folder ? skald::icons::kFolder : skald::icons::kFile,
+                          static_cast<int>(entry.name.size()),
+                          entry.name.data());
+            if (ImGui::Selectable(row_label,
+                                  selected,
+                                  ImGuiSelectableFlags_SpanAllColumns,
+                                  ImVec2(0.0f, 24.0f))) {
+                dialog.row_sel = i;
+                if (!entry.is_folder) {
+                    std::snprintf(dialog.filename,
+                                  sizeof(dialog.filename),
+                                  "%.*s",
+                                  static_cast<int>(entry.name.size()),
+                                  entry.name.data());
+                }
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(entry.size.data(), entry.size.data() + entry.size.size());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  skald::tokens::to_vec4(skald::tokens::ink::muted));
+            ImGui::TextUnformatted(entry.modified.data(),
+                                   entry.modified.data() + entry.modified.size());
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::TextUnformatted("Filename");
+    ImGui::SameLine(118.0f);
+    const float action_w = 220.0f;
+    ImGui::SetNextItemWidth(-(action_w + 12.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+                          skald::tokens::to_vec4(skald::tokens::surface::input));
+    ImGui::InputText("##fname", dialog.filename, sizeof dialog.filename);
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    if (skald::GhostButton("Cancel")) {
+        out = skald::FileDialogResult::Cancelled;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (skald::AccentButton(mode == skald::FileDialogMode::Open ? "Open" : "Save")) {
+        out = skald::FileDialogResult::Confirmed;
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+    return out;
+}
+
 void draw_file_dialog(AppState& state) {
     if (state.pending_dialog != DialogPurpose::None) {
         state.active_dialog = state.pending_dialog;
         state.pending_dialog = DialogPurpose::None;
-        skald::OpenFileDialog(kOpenFileDialogId);
+        ImGui::OpenPopup(file_dialog_popup_label(state.active_dialog));
     }
 
     if (state.active_dialog == DialogPurpose::None) {
@@ -2393,8 +2697,8 @@ void draw_file_dialog(AppState& state) {
     const skald::FileDialogMode mode = state.active_dialog == DialogPurpose::SaveWave
         ? skald::FileDialogMode::Save
         : skald::FileDialogMode::Open;
-    const skald::FileDialogResult result = skald::BeginFileDialog(
-        kOpenFileDialogId,
+    const skald::FileDialogResult result = begin_chromed_file_dialog(
+        state.active_dialog,
         mode,
         state.file_dialog,
         std::span<const skald::FileDialogEntry>(state.file_dialog_entries.data(),
@@ -2455,23 +2759,20 @@ void handle_shortcuts(AppState& state) {
 
 void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors) {
     handle_shortcuts(state);
+    if (state.splash_open) {
+        draw_splash(state);
+        draw_titlebar(state, window);
+        draw_file_dialog(state);
+        handle_custom_chrome(state, window, cursors);
+        return;
+    }
+
     draw_titlebar(state, window);
     draw_plot(state);
     draw_entity_toolbox(state);
     draw_inspector_overlay(state);
     draw_settings_dialog(state);
-    draw_splash(state);
-    ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
-    ImGui::Begin("##dialog_host", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoSavedSettings |
-                 ImGuiWindowFlags_NoInputs |
-                 ImGuiWindowFlags_NoBackground);
     draw_file_dialog(state);
-    ImGui::End();
     handle_custom_chrome(state, window, cursors);
 }
 
@@ -2515,7 +2816,7 @@ int main(int argc, char** argv) {
 
     AppState state;
     initialize_file_dialog(state);
-    state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR);
+    state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR, 14.0f, 13.0f, 40.0f);
     if (!args.file.empty()) {
         std::snprintf(state.path, sizeof(state.path), "%s", args.file.c_str());
         load_path(state);
