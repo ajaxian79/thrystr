@@ -40,6 +40,10 @@ constexpr float kTopChromeHeight = 44.0f;
 constexpr double kChromeResizeMargin = 8.0;
 constexpr int kMinWindowWidth = 760;
 constexpr int kMinWindowHeight = 460;
+constexpr int kSplashWindowWidth = 960;
+constexpr int kSplashWindowHeight = 560;
+constexpr int kSplashMinWindowWidth = 720;
+constexpr int kSplashMinWindowHeight = 460;
 constexpr ImVec2 kFileDialogSize{720.0f, 520.0f};
 constexpr ImVec2 kSettingsDialogSize{420.0f, 320.0f};
 constexpr std::size_t kWaveFitMaxSamples = 4096;
@@ -58,6 +62,13 @@ enum class DialogPurpose {
     OpenSource,
     LoadWave,
     SaveWave,
+};
+
+enum class StartupAction {
+    None,
+    NewWorkspace,
+    OpenWorkspace,
+    LoadSource,
 };
 
 enum class EntityType {
@@ -265,6 +276,56 @@ void force_undecorated_window(GLFWwindow* window) {
                     5);
     XFlush(display);
 #endif
+}
+
+void center_window_on_primary_monitor(GLFWwindow* window) {
+    if (!window) {
+        return;
+    }
+
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    if (!monitor) {
+        return;
+    }
+
+    int work_x = 0;
+    int work_y = 0;
+    int work_w = 0;
+    int work_h = 0;
+    glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_w, &work_h);
+
+    int window_w = 0;
+    int window_h = 0;
+    glfwGetWindowSize(window, &window_w, &window_h);
+    glfwSetWindowPos(window,
+                     work_x + std::max(0, (work_w - window_w) / 2),
+                     work_y + std::max(0, (work_h - window_h) / 2));
+}
+
+GLFWwindow* create_undecorated_window(int width,
+                                      int height,
+                                      const char* title,
+                                      int min_width,
+                                      int min_height,
+                                      bool visible) {
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
+
+    GLFWwindow* window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+    if (!window) {
+        return nullptr;
+    }
+
+    force_undecorated_window(window);
+    glfwSetWindowSizeLimits(window,
+                            min_width,
+                            min_height,
+                            GLFW_DONT_CARE,
+                            GLFW_DONT_CARE);
+    center_window_on_primary_monitor(window);
+    return window;
 }
 
 ChromeCursors create_chrome_cursors() {
@@ -1867,9 +1928,9 @@ void draw_settings_dialog(AppState& state) {
     }
 }
 
-void draw_splash(AppState& state) {
+StartupAction draw_splash(AppState& state) {
     if (!state.splash_open) {
-        return;
+        return StartupAction::None;
     }
 
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
@@ -1933,6 +1994,7 @@ void draw_splash(AppState& state) {
     ImGui::SetCursorScreenPos(ImVec2(right_x, second_y));
     skald::SectionHeader("Workspace");
     const ImVec2 action_size(column_w, 34.0f);
+    StartupAction choice = StartupAction::None;
     auto action_row = [&](const char* id,
                           const char* icon,
                           const char* label,
@@ -1988,7 +2050,7 @@ void draw_splash(AppState& state) {
                    "Create an empty workspace",
                    ImVec2(right_x, action_y),
                    true)) {
-        open_empty_workspace(state);
+        choice = StartupAction::NewWorkspace;
     }
     action_y += action_size.y + 8.0f;
     if (action_row("##splash_open_workspace",
@@ -1998,7 +2060,7 @@ void draw_splash(AppState& state) {
                    "Load saved wave data",
                    ImVec2(right_x, action_y),
                    false)) {
-        request_file_dialog(state, DialogPurpose::LoadWave);
+        choice = StartupAction::OpenWorkspace;
     }
     action_y += action_size.y + 8.0f;
     if (action_row("##splash_load_source",
@@ -2008,10 +2070,76 @@ void draw_splash(AppState& state) {
                    "Load a source data file",
                    ImVec2(right_x, action_y),
                    false)) {
-        request_file_dialog(state, DialogPurpose::OpenSource);
+        choice = StartupAction::LoadSource;
     }
 
     ImGui::End();
+    return choice;
+}
+
+void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
+    const ImVec2 viewport = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(viewport.x, kTopChromeHeight));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 7.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::Begin("##splash_titlebar", nullptr,
+                 ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus |
+                 ImGuiWindowFlags_NoNavFocus);
+    ImGui::PopStyleVar(2);
+
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(ImVec2(0.0f, 0.0f),
+                        ImVec2(viewport.x, kTopChromeHeight),
+                        skald::tokens::surface::deep);
+    draw->AddLine(ImVec2(0.0f, kTopChromeHeight - 1.0f),
+                  ImVec2(viewport.x, kTopChromeHeight - 1.0f),
+                  skald::tokens::border::separator,
+                  1.0f);
+
+    ImGui::SetCursorPos(ImVec2(16.0f, 10.0f));
+    if (state.fonts.sans_md) {
+        ImGui::PushFont(state.fonts.sans_md);
+    }
+    ImGui::TextUnformatted("thrystr");
+    if (state.fonts.sans_md) {
+        ImGui::PopFont();
+    }
+    ImGui::SameLine(72.0f);
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "/ start");
+
+    const float controls_width = 96.0f;
+    ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 8.0f));
+    if (window_control_button(WindowControl::Minimize, "Minimize", window)) {
+        glfwIconifyWindow(window);
+    }
+    ImGui::SameLine();
+    if (window_control_button(WindowControl::Maximize, "Maximize", window)) {
+        if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
+            glfwRestoreWindow(window);
+        } else {
+            glfwMaximizeWindow(window);
+        }
+    }
+    ImGui::SameLine();
+    if (window_control_button(WindowControl::Close, "Close", window)) {
+        state.request_close = true;
+    }
+
+    ImGui::End();
+}
+
+StartupAction draw_splash_window(AppState& state,
+                                 GLFWwindow* window,
+                                 const ChromeCursors& cursors) {
+    StartupAction choice = draw_splash(state);
+    draw_splash_titlebar(state, window);
+    handle_custom_chrome(state, window, cursors);
+    return choice;
 }
 
 void draw_entity_toolbox(AppState& state) {
@@ -2759,14 +2887,6 @@ void handle_shortcuts(AppState& state) {
 
 void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors) {
     handle_shortcuts(state);
-    if (state.splash_open) {
-        draw_splash(state);
-        draw_titlebar(state, window);
-        draw_file_dialog(state);
-        handle_custom_chrome(state, window, cursors);
-        return;
-    }
-
     draw_titlebar(state, window);
     draw_plot(state);
     draw_entity_toolbox(state);
@@ -2787,66 +2907,166 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    GLFWwindow* window = glfwCreateWindow(args.width, args.height, "thrystr", nullptr, nullptr);
+    ChromeCursors chrome_cursors = create_chrome_cursors();
+    AppState state;
+    initialize_file_dialog(state);
+
+    auto begin_imgui_for_window = [&](GLFWwindow* target) {
+        glfwMakeContextCurrent(target);
+        glfwSwapInterval(1);
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        skald::ApplyDefaults(skald::tokens::accents::cyan);
+        state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR, 14.0f, 13.0f, 40.0f);
+        ImGui_ImplGlfw_InitForOpenGL(target, true);
+        ImGui_ImplOpenGL3_Init("#version 130");
+    };
+
+    auto shutdown_imgui = [&]() {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        state.fonts = {};
+    };
+
+    auto begin_frame = []() {
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+    };
+
+    auto render_frame = [](GLFWwindow* target) {
+        ImGui::Render();
+        int fb_width = 0;
+        int fb_height = 0;
+        glfwGetFramebufferSize(target, &fb_width, &fb_height);
+        glViewport(0, 0, fb_width, fb_height);
+        glClearColor(0.035f, 0.040f, 0.055f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(target);
+        return std::pair<int, int>{fb_width, fb_height};
+    };
+
+    StartupAction startup_action = StartupAction::None;
+    bool screenshot_saved = false;
+    if (args.file.empty()) {
+        GLFWwindow* splash_window = create_undecorated_window(kSplashWindowWidth,
+                                                              kSplashWindowHeight,
+                                                              "thrystr start",
+                                                              kSplashMinWindowWidth,
+                                                              kSplashMinWindowHeight,
+                                                              false);
+        if (!splash_window) {
+            destroy_chrome_cursors(chrome_cursors);
+            glfwTerminate();
+            return 1;
+        }
+
+        begin_imgui_for_window(splash_window);
+        glfwShowWindow(splash_window);
+
+        int rendered_frames = 0;
+        while (!glfwWindowShouldClose(splash_window)) {
+            glfwPollEvents();
+            begin_frame();
+
+            StartupAction action = draw_splash_window(state, splash_window, chrome_cursors);
+            ImGuiIO& io = ImGui::GetIO();
+            const bool shortcut = io.KeyCtrl || io.KeySuper;
+            if (shortcut && ImGui::IsKeyPressed(ImGuiKey_N, false)) {
+                action = StartupAction::NewWorkspace;
+            }
+            if (state.request_close) {
+                glfwSetWindowShouldClose(splash_window, GLFW_TRUE);
+            }
+
+            const auto [fb_width, fb_height] = render_frame(splash_window);
+            ++rendered_frames;
+            if (!args.screenshot.empty() && rendered_frames >= args.frames) {
+                if (!save_screenshot(args.screenshot, fb_width, fb_height)) {
+                    std::fprintf(stderr,
+                                 "could not write screenshot: %s\n",
+                                 args.screenshot.c_str());
+                }
+                screenshot_saved = true;
+                break;
+            }
+            if (action != StartupAction::None) {
+                startup_action = action;
+                break;
+            }
+        }
+
+        shutdown_imgui();
+        glfwDestroyWindow(splash_window);
+        state.request_close = false;
+        state.chrome_action = ChromeAction::None;
+        state.splash_open = false;
+
+        if (screenshot_saved) {
+            destroy_chrome_cursors(chrome_cursors);
+            glfwTerminate();
+            return 0;
+        }
+        if (startup_action == StartupAction::None) {
+            destroy_chrome_cursors(chrome_cursors);
+            glfwTerminate();
+            return 0;
+        }
+
+        switch (startup_action) {
+        case StartupAction::NewWorkspace:
+            open_empty_workspace(state);
+            break;
+        case StartupAction::OpenWorkspace:
+            ensure_workspace(state);
+            request_file_dialog(state, DialogPurpose::LoadWave);
+            break;
+        case StartupAction::LoadSource:
+            ensure_workspace(state);
+            request_file_dialog(state, DialogPurpose::OpenSource);
+            break;
+        case StartupAction::None:
+            break;
+        }
+    } else {
+        state.splash_open = false;
+    }
+
+    GLFWwindow* window = create_undecorated_window(args.width,
+                                                  args.height,
+                                                  "thrystr",
+                                                  kMinWindowWidth,
+                                                  kMinWindowHeight,
+                                                  false);
     if (!window) {
+        destroy_chrome_cursors(chrome_cursors);
         glfwTerminate();
         return 1;
     }
-    force_undecorated_window(window);
-    glfwSetWindowSizeLimits(window,
-                            kMinWindowWidth,
-                            kMinWindowHeight,
-                            GLFW_DONT_CARE,
-                            GLFW_DONT_CARE);
-    glfwShowWindow(window);
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-    ChromeCursors chrome_cursors = create_chrome_cursors();
 
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    skald::ApplyDefaults(skald::tokens::accents::cyan);
-
-    AppState state;
-    initialize_file_dialog(state);
-    state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR, 14.0f, 13.0f, 40.0f);
+    begin_imgui_for_window(window);
     if (!args.file.empty()) {
         std::snprintf(state.path, sizeof(state.path), "%s", args.file.c_str());
         load_path(state);
     }
-
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init("#version 130");
+    glfwShowWindow(window);
 
     int rendered_frames = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
+        begin_frame();
 
         draw_app(state, window, chrome_cursors);
         if (state.request_close) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
 
-        ImGui::Render();
-        int fb_width = 0;
-        int fb_height = 0;
-        glfwGetFramebufferSize(window, &fb_width, &fb_height);
-        glViewport(0, 0, fb_width, fb_height);
-        glClearColor(0.035f, 0.040f, 0.055f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        glfwSwapBuffers(window);
+        const auto [fb_width, fb_height] = render_frame(window);
 
         ++rendered_frames;
         if (!args.screenshot.empty() && rendered_frames >= args.frames) {
@@ -2857,9 +3077,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    shutdown_imgui();
     destroy_chrome_cursors(chrome_cursors);
     glfwDestroyWindow(window);
     glfwTerminate();
