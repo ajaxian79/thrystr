@@ -43,6 +43,8 @@ constexpr int kSplashWindowWidth = 960;
 constexpr int kSplashWindowHeight = 560;
 constexpr int kSplashMinWindowWidth = 720;
 constexpr int kSplashMinWindowHeight = 460;
+constexpr float kWindowControlButtonSize = 28.0f;
+constexpr float kWindowControlRightMargin = 12.0f;
 constexpr ImVec2 kSettingsDialogSize{420.0f, 320.0f};
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
@@ -1556,7 +1558,7 @@ bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = f
 }
 
 bool window_control_button(WindowControl control, const char* tooltip, GLFWwindow* window) {
-    const float size = 28.0f;
+    const float size = kWindowControlButtonSize;
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const char* id = control == WindowControl::Minimize
         ? "##window_minimize"
@@ -1622,6 +1624,17 @@ bool window_control_button(WindowControl control, const char* tooltip, GLFWwindo
         skald::Tooltip(tooltip);
     }
     return clicked;
+}
+
+float window_control_group_width(int button_count) {
+    if (button_count <= 0) {
+        return kWindowControlRightMargin;
+    }
+    const float gaps =
+        static_cast<float>(button_count - 1) * ImGui::GetStyle().ItemSpacing.x;
+    return static_cast<float>(button_count) * kWindowControlButtonSize +
+           gaps +
+           kWindowControlRightMargin;
 }
 
 ImVec2 begin_titlebar_chrome(const char* id) {
@@ -1748,7 +1761,7 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
                        state.status.c_str());
 
-    const float controls_width = 96.0f;
+    const float controls_width = window_control_group_width(3);
     ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 8.0f));
     if (window_control_button(WindowControl::Minimize, "Minimize", window)) {
         glfwIconifyWindow(window);
@@ -2094,7 +2107,7 @@ void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
     draw_titlebar_background(viewport);
     draw_titlebar_wordmark(state, "/ start");
 
-    ImGui::SetCursorPos(ImVec2(viewport.x - 40.0f, 8.0f));
+    ImGui::SetCursorPos(ImVec2(viewport.x - window_control_group_width(1), 8.0f));
     if (window_control_button(WindowControl::Close, "Close", window)) {
         state.request_close = true;
     }
