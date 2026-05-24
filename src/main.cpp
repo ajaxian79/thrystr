@@ -3099,10 +3099,12 @@ void draw_plot(AppState& state) {
     const float child_width = ImGui::GetWindowWidth();
     const float max_scroll_x = std::max(0.0f, logical_width - child_width);
     const float native_scroll_x = ImGui::GetScrollX();
+    const bool native_scrollbar_drag =
+        child_mouse_inside &&
+        io.MouseDown[ImGuiMouseButton_Left] &&
+        io.MousePos.y >= child_pos.y + child_size.y - ImGui::GetFrameHeightWithSpacing();
     state.timeline_scroll_x = std::clamp(state.timeline_scroll_x, 0.0f, max_scroll_x);
-    if (!state.pending_scroll_index &&
-        !state.xline_playing &&
-        io.MouseWheel == 0.0f &&
+    if (native_scrollbar_drag &&
         std::abs(native_scroll_x - state.timeline_scroll_x) > 0.5f) {
         state.timeline_scroll_x = std::clamp(native_scroll_x, 0.0f, max_scroll_x);
     }
