@@ -8,7 +8,6 @@ project(thrystr
 option(THRYSTR_BUILD_APP "Build the OpenGL/ImGui application" ON)
 option(THRYSTR_BUILD_TESTS "Build unit tests" ON)
 option(THRYSTR_BUILD_FUZZ "Build libFuzzer targets" OFF)
-set(THRYSTR_SKALD_SOURCE_DIR "" CACHE PATH "Optional local Skald checkout")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,22 +18,18 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
         "Build type for single-config generators" FORCE)
 endif()
 
-include(FetchContent)
-
-if(THRYSTR_SKALD_SOURCE_DIR)
-    set(SKALD_BUILD_TEMPLATE OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${THRYSTR_SKALD_SOURCE_DIR}"
-                     "${CMAKE_BINARY_DIR}/_deps/skald-build")
-    set(THRYSTR_SKALD_FONT_DIR "${THRYSTR_SKALD_SOURCE_DIR}/fonts")
-else()
-    set(SKALD_BUILD_TEMPLATE OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(skald
-        GIT_REPOSITORY https://github.com/ajaxian79/skald.git
-        GIT_TAG        73e0887af857b8a9d6c84ffd0fd5119c5e166ec3
-        GIT_SHALLOW    TRUE)
-    FetchContent_MakeAvailable(skald)
-    set(THRYSTR_SKALD_FONT_DIR "${skald_SOURCE_DIR}/fonts")
-endif()
+function(thrystr_disable_vendor_warnings target_name)
+    if(TARGET ${target_name})
+        target_compile_options(${target_name} PRIVATE
+            $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-w>
+            $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-w>
+            $<$<COMPILE_LANG_AND_ID:C,MSVC>:/w>
+            $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/w>)
+        set_target_properties(${target_name} PROPERTIES
+            C_CLANG_TIDY ""
+            CXX_CLANG_TIDY "")
+    endif()
+endfunction()
 
 add_library(thrystr_core STATIC
     src/scalar_analysis.cpp)
@@ -61,46 +56,48 @@ if(THRYSTR_BUILD_APP)
     find_package(OpenGL REQUIRED)
     find_package(X11 QUIET)
 
-    find_package(glfw3 QUIET)
-    if(NOT glfw3_FOUND AND NOT TARGET glfw)
-        set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
-        set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-        set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
-        FetchContent_Declare(glfw
-            GIT_REPOSITORY https://github.com/glfw/glfw.git
-            GIT_TAG        3.4
-            GIT_SHALLOW    TRUE)
-        FetchContent_MakeAvailable(glfw)
+    set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
+    if(UNIX AND NOT APPLE)
+        set(GLFW_BUILD_X11     ON  CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
     endif()
+    add_subdirectory(src/gui/vendor/glfw EXCLUDE_FROM_ALL)
+    add_library(thrystr::glfw ALIAS glfw)
+    thrystr_disable_vendor_warnings(glfw)
 
-    if(NOT TARGET imgui_backends)
-        if(NOT DEFINED imgui_SOURCE_DIR)
-            get_target_property(THRYSTR_IMGUI_INCLUDE_DIRS imgui INTERFACE_INCLUDE_DIRECTORIES)
-            foreach(dir IN LISTS THRYSTR_IMGUI_INCLUDE_DIRS)
-                if(EXISTS "${dir}/backends/imgui_impl_glfw.cpp")
-                    set(imgui_SOURCE_DIR "${dir}")
-                    break()
-                endif()
-            endforeach()
-        endif()
-        if(NOT DEFINED imgui_SOURCE_DIR)
-            message(FATAL_ERROR "Could not locate Dear ImGui backend sources")
-        endif()
+    add_library(thrystr_imgui STATIC
+        src/gui/vendor/imgui/imgui.cpp
+        src/gui/vendor/imgui/imgui_draw.cpp
+        src/gui/vendor/imgui/imgui_tables.cpp
+        src/gui/vendor/imgui/imgui_widgets.cpp
+        src/gui/vendor/imgui/backends/imgui_impl_glfw.cpp
+        src/gui/vendor/imgui/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(thrystr_imgui SYSTEM PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/imgui
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/imgui/backends)
+    target_link_libraries(thrystr_imgui PUBLIC thrystr::glfw OpenGL::GL)
+    thrystr_disable_vendor_warnings(thrystr_imgui)
+    add_library(thrystr::imgui ALIAS thrystr_imgui)
 
-        add_library(imgui_backends STATIC
-            ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-            ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
-        target_include_directories(imgui_backends SYSTEM PUBLIC
-            ${imgui_SOURCE_DIR}/backends)
-        target_link_libraries(imgui_backends PUBLIC imgui glfw OpenGL::GL)
-    endif()
+    add_library(thrystr_skald STATIC
+        src/gui/vendor/skald/src/theme.cpp
+        src/gui/vendor/skald/src/widgets.cpp
+        src/gui/vendor/skald/src/fonts.cpp)
+    target_include_directories(thrystr_skald PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/skald/include)
+    target_link_libraries(thrystr_skald PUBLIC thrystr::imgui)
+    thrystr_disable_vendor_warnings(thrystr_skald)
+    add_library(skald::skald ALIAS thrystr_skald)
 
     add_library(thrystr_stb_image_write STATIC
-        third_party/stb/stb_image_impl.cpp
-        third_party/stb/stb_image_write_impl.cpp)
+        src/gui/vendor/stb/stb_image_impl.cpp
+        src/gui/vendor/stb/stb_image_write_impl.cpp)
     target_include_directories(thrystr_stb_image_write PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/stb)
+    thrystr_disable_vendor_warnings(thrystr_stb_image_write)
 
     add_executable(thrystr
         src/main.cpp
@@ -109,9 +106,9 @@ if(THRYSTR_BUILD_APP)
         thrystr_core
         thrystr_app
         skald::skald
-        imgui_backends
+        thrystr::imgui
         thrystr_stb_image_write
-        glfw
+        thrystr::glfw
         OpenGL::GL)
     if(X11_FOUND)
         target_include_directories(thrystr PRIVATE ${X11_INCLUDE_DIR})
@@ -119,7 +116,7 @@ if(THRYSTR_BUILD_APP)
         target_compile_definitions(thrystr PRIVATE THRYSTR_HAS_X11=1)
     endif()
     target_compile_definitions(thrystr PRIVATE
-        THRYSTR_SKALD_FONT_DIR="${THRYSTR_SKALD_FONT_DIR}"
+        THRYSTR_SKALD_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts"
         THRYSTR_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
     target_compile_options(thrystr PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>

@@ -6,14 +6,17 @@ LicenseRef-thrystr-dual
     First-party thrystr source code. See LICENSE.
 
 Dear ImGui - https://github.com/ocornut/imgui - MIT
-    Vendored path pending. Preserve upstream LICENSE.txt when vendored.
+    Vendored at src/gui/vendor/imgui. See LICENSE.txt and VERSION.
+    Pinned to v1.91.5-docking at 368123ab06b2b573d585e52f84cd782c5c006697.
+    imgui_demo.cpp is intentionally not vendored.
 
 skald - https://github.com/ajaxian79/skald - MIT
-    Vendored path pending. Preserve upstream LICENSE when vendored.
+    Vendored at src/gui/vendor/skald. See LICENSE.skald.txt and VERSION.
+    Pinned to 73e0887af857b8a9d6c84ffd0fd5119c5e166ec3.
 
 GLFW - https://www.glfw.org/ - zlib/libpng license
-    Vendored path pending. Preserve upstream LICENSE.md when vendored.
+    Vendored at src/gui/vendor/glfw. See LICENSE.md and VERSION.
+    Pinned to 3.4 at 7b6aead9fb88b3623e3b3725ebb42670cbe4c579.
 
 stb_image_write - https://github.com/nothings/stb - public domain / MIT
-    Vendored at third_party/stb in the current tree; moves under src/gui/vendor/stb
-    during the single-branch remediation.
+    Vendored at src/gui/vendor/stb.
