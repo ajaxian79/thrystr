@@ -58,14 +58,14 @@ jobs:
           sudo apt-get install -y cmake ninja-build clang libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Configure ASan/UBSan
         run: >
-          cmake -B build-asan -S .
+          cmake -B build -S .
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CXX_COMPILER=clang++
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
       - name: Build
-        run: cmake --build build-asan --parallel
+        run: cmake --build build --parallel
       - name: Test
-        run: ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build-asan --output-on-failure
+        run: ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build --output-on-failure
 
   format:
     name: clang-format
@@ -91,11 +91,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang clang-tidy libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Configure compile database
-        run: cmake -B build-tidy -S . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_COMPILER=clang++
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_COMPILER=clang++
       - name: Run clang-tidy on first-party files
         run: |
           files=$(git ls-files 'include/thrystr/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tools/**/*.cpp' 'tools/**/*.hpp' | grep -v '/vendor/' || true)
-          test -z "$files" || clang-tidy -p build-tidy $files
+          test -z "$files" || clang-tidy -p build $files
 
   fuzz:
     name: fuzz-wave-settings
@@ -109,14 +109,14 @@ jobs:
           sudo apt-get install -y cmake ninja-build clang libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Build fuzz target
         run: >
-          cmake -B build-fuzz -S .
+          cmake -B build -S .
           -DCMAKE_BUILD_TYPE=Debug
           -DTHRYSTR_BUILD_FUZZ=ON
           -DCMAKE_CXX_COMPILER=clang++
       - name: Compile
-        run: cmake --build build-fuzz --target thrystr_wave_settings_fuzz --parallel
+        run: cmake --build build --target thrystr_wave_settings_fuzz --parallel
       - name: Run short fuzz pass
-        run: ./build-fuzz/thrystr_wave_settings_fuzz -max_total_time=60
+        run: ./build/thrystr_wave_settings_fuzz -max_total_time=60
 
   gitleaks:
     name: gitleaks

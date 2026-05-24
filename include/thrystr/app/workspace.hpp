@@ -9,10 +9,17 @@
 
 namespace thrystr::app {
 
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+using Scalar = __float128;
+#else
+using Scalar = long double;
+#endif
+
 constexpr std::uint8_t kNoParityTrack = 0xffu;
 constexpr std::size_t kMaxTracks = 17u;
 constexpr std::size_t kMaxDataTracks = 16u;
 constexpr std::size_t kMinSectionSize = 2u;
+constexpr std::size_t kMinSegmentSize = 1000u;
 constexpr double kDefaultSectionSpacingNm = 1.0;
 constexpr double kDefaultSectionTolerance = 1.0 / 128.0;
 
@@ -60,7 +67,7 @@ std::uint64_t section_end(const Section& section);
 bool section_contains(const Section& section, std::size_t index);
 
 /// Evaluate a section wave at a source index.
-double wave_value_at_index(const Section& section, std::size_t index);
+Scalar wave_value_at_index(const Section& section, std::size_t index);
 
 /// Return the number of bytes required to store one ownership bit per sample.
 std::size_t owned_mask_size(std::size_t sample_count);

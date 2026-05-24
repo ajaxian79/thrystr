@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-thrystr-dual
-#include <thrystr/scalar_analysis.hpp>
 #include <thrystr/app/convergent_fit.hpp>
 #include <thrystr/app/fit_validation.hpp>
 #include <thrystr/app/multi_track_fit.hpp>
 #include <thrystr/render_io.hpp>
+#include <thrystr/scalar_analysis.hpp>
 
 #include <GLFW/glfw3.h>
 #if defined(THRYSTR_HAS_X11) && defined(__linux__)
@@ -23,31 +23,35 @@
 #if defined(THRYSTR_HAS_DOCS)
 #include "docs_resources.hpp"
 #endif
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#include <quadmath.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
-#include <cerrno>
-#include <charconv>
 #include <cctype>
+#include <cerrno>
 #include <cfloat>
+#include <charconv>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <numbers>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -86,12 +90,19 @@ constexpr const char* kSplashHeroPath = THRYSTR_ASSET_DIR "/splash_hero.png";
 constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
-constexpr std::uint32_t kWaveSettingsVersion = 5;
+constexpr std::uint32_t kWaveSettingsVersion = 6;
 constexpr std::uint32_t kWaveSettingsEndianStamp = 0x01020304u;
 constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
 constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
 constexpr std::uint32_t kMaxWaveSettingsMaskBytes = 512u * 1024u * 1024u;
 constexpr std::size_t kAutoFitMaxSamples = 65536u;
+constexpr std::size_t kMaxFitValidationIssues = 512u;
+constexpr std::uint8_t kTrackAutoFitMinDataTracks = 2u;
+constexpr std::uint8_t kTrackAutoFitMaxDataTracks =
+    static_cast<std::uint8_t>(thrystr::app::kMaxDataTracks);
+constexpr std::size_t kEncodedWorkspaceHeaderBytes = 16u;
+constexpr std::size_t kEncodedTrackHeaderBytes = 8u;
+constexpr std::size_t kEncodedSectionBytes = sizeof(std::uint32_t) * 2u + sizeof(double) * 8u;
 constexpr ImU32 kTransparent = IM_COL32(0, 0, 0, 0);
 
 const ImU32 kDataPointHi = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.92f);
@@ -100,12 +111,10 @@ const ImU32 kDataPointLo = skald::tokens::with_alpha(skald::tokens::ink::primary
 const ImU32 kDataLineColor = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
 const ImU32 kMaxDeltaFill =
     skald::tokens::with_alpha(skald::tokens::status::destructive, 40.0f / 255.0f);
-const ImU32 kSelectionFill =
-    skald::tokens::with_alpha(skald::tokens::status::info, 32.0f / 255.0f);
+const ImU32 kSelectionFill = skald::tokens::with_alpha(skald::tokens::status::info, 32.0f / 255.0f);
 const ImU32 kSelectionEdge =
     skald::tokens::with_alpha(skald::tokens::status::info, 210.0f / 255.0f);
-const ImU32 kSelectionHandle =
-    skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
+const ImU32 kSelectionHandle = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
 const std::array<ImU32, 6> kWaveColors = {
     skald::tokens::with_alpha(skald::tokens::accents::gold, 0.86f),
     skald::tokens::with_alpha(skald::tokens::accents::mint, 0.86f),
@@ -136,6 +145,7 @@ enum class EntityType {
 
 struct DataEntity {
     double spatial_period_nm = 1.0;
+    std::uint8_t sample_bits = 8;
 };
 
 struct WaveEntity {
@@ -174,7 +184,30 @@ struct LazyBlock {
     std::size_t offset = 0;
     std::vector<std::uint8_t> bytes;
     std::vector<std::uint8_t> mapped_bytes;
+    std::vector<thrystr::app::Scalar> scalars;
     std::uint64_t last_used_frame = 0;
+};
+
+struct SegmentFitPatch {
+    std::size_t start_offset = 0;
+    std::size_t sample_count = 0;
+    std::size_t segment_index = 0;
+    thrystr::app::WorkspaceModel workspace;
+    thrystr::app::ValidationReport validation;
+    bool used_parity = false;
+    bool cancelled = false;
+};
+
+struct EncodingEstimate {
+    std::size_t source_bytes = 0;
+    std::size_t covered_samples = 0;
+    std::size_t encoded_bytes = 0;
+    std::size_t curve_points = 0;
+    std::size_t data_tracks = 0;
+    std::size_t data_sections = 0;
+    std::size_t parity_sections = 0;
+    double source_ratio = 0.0;
+    double covered_ratio = 0.0;
 };
 
 struct AutoFitJob {
@@ -186,12 +219,19 @@ struct AutoFitJob {
     std::vector<thrystr::app::Section> sections;
     thrystr::app::WorkspaceModel workspace;
     thrystr::app::ValidationReport validation;
+    std::vector<SegmentFitPatch> pending_patches;
     bool cancelled = false;
     bool multi_track = false;
     bool used_parity = false;
+    bool partial_dirty = false;
     std::size_t start_offset = 0;
     std::size_t requested_last = 0;
     std::size_t capped_last = 0;
+    std::size_t processed_samples = 0;
+    std::size_t total_samples = 0;
+    std::size_t completed_segments = 0;
+    std::size_t total_segments = 0;
+    std::string progress_label;
     std::string error;
 };
 
@@ -335,6 +375,10 @@ struct AppState {
     ImVec2 splash_hero_size{};
 };
 
+const Entity* data_entity(const AppState& state);
+Entity* data_entity(AppState& state);
+bool playback_speed_button(const char* label, bool selected, float width = 42.0f);
+
 Args parse_args(int argc, char** argv) {
     Args args;
     for (int i = 1; i < argc; ++i) {
@@ -350,9 +394,7 @@ Args parse_args(int argc, char** argv) {
                 if (parse_non_negative_int(value, dst)) {
                     return true;
                 }
-                std::fprintf(stderr,
-                             "warning: ignoring invalid value for %s: %s\n",
-                             flag,
+                std::fprintf(stderr, "warning: ignoring invalid value for %s: %s\n", flag,
                              value.c_str());
             }
             return false;
@@ -412,14 +454,8 @@ void force_undecorated_window(GLFWwindow* window) {
     hints.flags = kDecorationsFlag;
     hints.decorations = 0;
     const Atom property = XInternAtom(display, "_MOTIF_WM_HINTS", False);
-    XChangeProperty(display,
-                    xwindow,
-                    property,
-                    property,
-                    32,
-                    PropModeReplace,
-                    reinterpret_cast<const unsigned char*>(&hints),
-                    5);
+    XChangeProperty(display, xwindow, property, property, 32, PropModeReplace,
+                    reinterpret_cast<const unsigned char*>(&hints), 5);
     XFlush(display);
 #endif
 }
@@ -443,8 +479,7 @@ void center_window_on_primary_monitor(GLFWwindow* window) {
     int window_w = 0;
     int window_h = 0;
     glfwGetWindowSize(window, &window_w, &window_h);
-    glfwSetWindowPos(window,
-                     work_x + std::max(0, (work_w - window_w) / 2),
+    glfwSetWindowPos(window, work_x + std::max(0, (work_w - window_w) / 2),
                      work_y + std::max(0, (work_h - window_h) / 2));
 }
 
@@ -484,13 +519,8 @@ void apply_window_geometry(GLFWwindow* window, const WindowGeometry& geometry) {
     glfwSetWindowSize(window, geometry.width, geometry.height);
 }
 
-GLFWwindow* create_undecorated_window(int width,
-                                      int height,
-                                      const char* title,
-                                      int min_width,
-                                      int min_height,
-                                      bool resizable,
-                                      bool visible) {
+GLFWwindow* create_undecorated_window(int width, int height, const char* title, int min_width,
+                                      int min_height, bool resizable, bool visible) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
@@ -503,9 +533,7 @@ GLFWwindow* create_undecorated_window(int width,
     }
 
     force_undecorated_window(window);
-    glfwSetWindowSizeLimits(window,
-                            resizable ? min_width : width,
-                            resizable ? min_height : height,
+    glfwSetWindowSizeLimits(window, resizable ? min_width : width, resizable ? min_height : height,
                             resizable ? GLFW_DONT_CARE : width,
                             resizable ? GLFW_DONT_CARE : height);
     center_window_on_primary_monitor(window);
@@ -545,33 +573,26 @@ bool chrome_action_is_resize(ChromeAction action) {
 }
 
 bool chrome_action_has_left(ChromeAction action) {
-    return action == ChromeAction::ResizeLeft ||
-           action == ChromeAction::ResizeTopLeft ||
+    return action == ChromeAction::ResizeLeft || action == ChromeAction::ResizeTopLeft ||
            action == ChromeAction::ResizeBottomLeft;
 }
 
 bool chrome_action_has_right(ChromeAction action) {
-    return action == ChromeAction::ResizeRight ||
-           action == ChromeAction::ResizeTopRight ||
+    return action == ChromeAction::ResizeRight || action == ChromeAction::ResizeTopRight ||
            action == ChromeAction::ResizeBottomRight;
 }
 
 bool chrome_action_has_top(ChromeAction action) {
-    return action == ChromeAction::ResizeTop ||
-           action == ChromeAction::ResizeTopLeft ||
+    return action == ChromeAction::ResizeTop || action == ChromeAction::ResizeTopLeft ||
            action == ChromeAction::ResizeTopRight;
 }
 
 bool chrome_action_has_bottom(ChromeAction action) {
-    return action == ChromeAction::ResizeBottom ||
-           action == ChromeAction::ResizeBottomLeft ||
+    return action == ChromeAction::ResizeBottom || action == ChromeAction::ResizeBottomLeft ||
            action == ChromeAction::ResizeBottomRight;
 }
 
-ChromeAction resize_action_at(double cursor_x,
-                              double cursor_y,
-                              int window_w,
-                              int window_h) {
+ChromeAction resize_action_at(double cursor_x, double cursor_y, int window_w, int window_h) {
     const bool left = cursor_x >= 0.0 && cursor_x <= kChromeResizeMargin;
     const bool right = cursor_x <= static_cast<double>(window_w) &&
                        cursor_x >= static_cast<double>(window_w) - kChromeResizeMargin;
@@ -627,8 +648,7 @@ GLFWcursor* cursor_for_action(const ChromeCursors& cursors, ChromeAction action)
     return nullptr;
 }
 
-std::pair<double, double> global_cursor_position(GLFWwindow* window,
-                                                 double cursor_x,
+std::pair<double, double> global_cursor_position(GLFWwindow* window, double cursor_x,
                                                  double cursor_y) {
 #if defined(THRYSTR_USE_X11)
     if (window && glfwGetPlatform() == GLFW_PLATFORM_X11) {
@@ -642,15 +662,8 @@ std::pair<double, double> global_cursor_position(GLFWwindow* window,
             int window_x = 0;
             int window_y = 0;
             unsigned int mask = 0;
-            if (XQueryPointer(display,
-                              xwindow,
-                              &root,
-                              &child,
-                              &root_x,
-                              &root_y,
-                              &window_x,
-                              &window_y,
-                              &mask)) {
+            if (XQueryPointer(display, xwindow, &root, &child, &root_x, &root_y, &window_x,
+                              &window_y, &mask)) {
                 return {static_cast<double>(root_x), static_cast<double>(root_y)};
             }
         }
@@ -665,10 +678,7 @@ std::pair<double, double> global_cursor_position(GLFWwindow* window,
     };
 }
 
-void begin_chrome_action(AppState& state,
-                         GLFWwindow* window,
-                         ChromeAction action,
-                         double cursor_x,
+void begin_chrome_action(AppState& state, GLFWwindow* window, ChromeAction action, double cursor_x,
                          double cursor_y) {
     state.chrome_action = action;
     const auto [global_x, global_y] = global_cursor_position(window, cursor_x, cursor_y);
@@ -678,10 +688,7 @@ void begin_chrome_action(AppState& state,
     glfwGetWindowSize(window, &state.chrome_start_window_w, &state.chrome_start_window_h);
 }
 
-void update_chrome_action(AppState& state,
-                          GLFWwindow* window,
-                          double cursor_x,
-                          double cursor_y) {
+void update_chrome_action(AppState& state, GLFWwindow* window, double cursor_x, double cursor_y) {
     const auto [global_x, global_y] = global_cursor_position(window, cursor_x, cursor_y);
     const int dx = static_cast<int>(std::lround(global_x - state.chrome_start_global_x));
     const int dy = static_cast<int>(std::lround(global_y - state.chrome_start_global_y));
@@ -692,17 +699,14 @@ void update_chrome_action(AppState& state,
             Display* display = glfwGetX11Display();
             const Window xwindow = glfwGetX11Window(window);
             if (display && xwindow != 0) {
-                XMoveWindow(display,
-                            xwindow,
-                            state.chrome_start_window_x + dx,
+                XMoveWindow(display, xwindow, state.chrome_start_window_x + dx,
                             state.chrome_start_window_y + dy);
                 XFlush(display);
                 return;
             }
         }
 #endif
-        glfwSetWindowPos(window,
-                         state.chrome_start_window_x + dx,
+        glfwSetWindowPos(window, state.chrome_start_window_x + dx,
                          state.chrome_start_window_y + dy);
         return;
     }
@@ -739,11 +743,7 @@ void update_chrome_action(AppState& state,
         Display* display = glfwGetX11Display();
         const Window xwindow = glfwGetX11Window(window);
         if (display && xwindow != 0) {
-            XMoveResizeWindow(display,
-                              xwindow,
-                              x,
-                              y,
-                              static_cast<unsigned int>(w),
+            XMoveResizeWindow(display, xwindow, x, y, static_cast<unsigned int>(w),
                               static_cast<unsigned int>(h));
             XFlush(display);
             return;
@@ -757,9 +757,7 @@ void update_chrome_action(AppState& state,
     glfwSetWindowSize(window, w, h);
 }
 
-void handle_custom_chrome(AppState& state,
-                          GLFWwindow* window,
-                          const ChromeCursors& cursors,
+void handle_custom_chrome(AppState& state, GLFWwindow* window, const ChromeCursors& cursors,
                           bool allow_resize = true) {
     if (!window || glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
         return;
@@ -789,22 +787,21 @@ void handle_custom_chrome(AppState& state,
         return;
     }
 
-    const ChromeAction resize_action = allow_resize
-        ? resize_action_at(cursor_x, cursor_y, window_w, window_h)
-        : ChromeAction::None;
+    const ChromeAction resize_action =
+        allow_resize ? resize_action_at(cursor_x, cursor_y, window_w, window_h)
+                     : ChromeAction::None;
     const bool resize_hovered = chrome_action_is_resize(resize_action);
     const bool titlebar_hovered =
         cursor_y >= 0.0 && cursor_y <= static_cast<double>(kTopChromeHeight);
     const bool item_hovered = ImGui::IsAnyItemHovered();
     const ChromeAction hover_action =
-        resize_hovered ? resize_action
-                       : (titlebar_hovered && !item_hovered ? ChromeAction::Move
-                                                            : ChromeAction::None);
+        resize_hovered
+            ? resize_action
+            : (titlebar_hovered && !item_hovered ? ChromeAction::Move : ChromeAction::None);
 
     glfwSetCursor(window, cursor_for_action(cursors, hover_action));
 
-    if (hover_action != ChromeAction::None &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (hover_action != ChromeAction::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         begin_chrome_action(state, window, hover_action, cursor_x, cursor_y);
     }
 }
@@ -820,8 +817,8 @@ std::string format_bytes(std::uintmax_t bytes) {
 
     char buffer[64] = {};
     if (unit == 0) {
-        std::snprintf(buffer, sizeof(buffer), "%ju %s",
-                      static_cast<std::uintmax_t>(bytes), units[unit]);
+        std::snprintf(buffer, sizeof(buffer), "%ju %s", static_cast<std::uintmax_t>(bytes),
+                      units[unit]);
     } else {
         std::snprintf(buffer, sizeof(buffer), "%.2f %s", value, units[unit]);
     }
@@ -834,8 +831,19 @@ std::string format_count(std::size_t count) {
     return buffer;
 }
 
-template <std::size_t N>
-void copy_to_buffer(char (&buffer)[N], const std::string& value) {
+std::string format_scalar(double value) {
+    char buffer[64] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.6f", value);
+    return buffer;
+}
+
+std::string format_percent(double ratio) {
+    char buffer[64] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.2f%%", ratio * 100.0);
+    return buffer;
+}
+
+template <std::size_t N> void copy_to_buffer(char (&buffer)[N], const std::string& value) {
     std::snprintf(buffer, N, "%s", value.c_str());
 }
 
@@ -911,16 +919,15 @@ void refresh_file_dialog_entries(AppState& state) {
         });
     }
 
-    std::sort(rows.begin(), rows.end(), [](const FileBrowserEntry& left,
-                                           const FileBrowserEntry& right) {
-        if (left.is_folder != right.is_folder) {
-            return left.is_folder;
-        }
-        return left.name < right.name;
-    });
+    std::sort(rows.begin(), rows.end(),
+              [](const FileBrowserEntry& left, const FileBrowserEntry& right) {
+                  if (left.is_folder != right.is_folder) {
+                      return left.is_folder;
+                  }
+                  return left.name < right.name;
+              });
 
-    state.file_dialog_rows.insert(state.file_dialog_rows.end(),
-                                  rows.begin(), rows.end());
+    state.file_dialog_rows.insert(state.file_dialog_rows.end(), rows.begin(), rows.end());
     state.file_dialog_entries.reserve(state.file_dialog_rows.size());
     for (const FileBrowserEntry& row : state.file_dialog_rows) {
         state.file_dialog_entries.push_back(skald::FileDialogEntry{
@@ -934,21 +941,183 @@ void refresh_file_dialog_entries(AppState& state) {
 
 std::size_t lazy_block_bytes(const AppState& state) {
     const int mib = std::clamp(state.lazy_block_mib, 1, 10);
-    return std::clamp(static_cast<std::size_t>(mib) * 1024u * 1024u,
-                      kLazyBlockMinBytes,
+    return std::clamp(static_cast<std::size_t>(mib) * 1024u * 1024u, kLazyBlockMinBytes,
                       kLazyBlockMaxBytes);
+}
+
+std::uint8_t normalize_sample_bits(std::uint8_t bits) {
+    switch (bits) {
+    case 8:
+    case 16:
+    case 32:
+    case 64:
+        return bits;
+    default:
+        return 8;
+    }
+}
+
+std::uint8_t data_sample_bits(const AppState& state) {
+    const Entity* data = data_entity(state);
+    return data ? normalize_sample_bits(data->data.sample_bits) : 8u;
+}
+
+std::size_t data_sample_bytes(const AppState& state) {
+    return static_cast<std::size_t>(data_sample_bits(state) / 8u);
+}
+
+std::size_t lazy_block_samples(const AppState& state) {
+    return std::max<std::size_t>(1u, lazy_block_bytes(state) / data_sample_bytes(state));
 }
 
 std::size_t source_sample_count(const AppState& state) {
     if (!state.analysis) {
         return 0u;
     }
+    const std::size_t sample_bytes = data_sample_bytes(state);
     if (state.analysis->source_size > 0) {
-        return static_cast<std::size_t>(std::min<std::uintmax_t>(
+        const std::size_t byte_count = static_cast<std::size_t>(std::min<std::uintmax_t>(
             state.analysis->source_size,
             static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())));
+        return byte_count / sample_bytes;
     }
     return state.analysis->scalars.size();
+}
+
+thrystr::app::Scalar scalar_ldexp(thrystr::app::Scalar value, int exponent) {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    return ldexpq(value, exponent);
+#else
+    return std::ldexp(value, exponent);
+#endif
+}
+
+bool scalar_isfinite(thrystr::app::Scalar value) {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    return finiteq(value) != 0;
+#else
+    return std::isfinite(value);
+#endif
+}
+
+thrystr::app::Scalar scalar_trunc(thrystr::app::Scalar value) {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    return truncq(value);
+#else
+    return std::trunc(value);
+#endif
+}
+
+thrystr::app::Scalar scalar_fmod(thrystr::app::Scalar value, thrystr::app::Scalar divisor) {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    return fmodq(value, divisor);
+#else
+    return std::fmod(value, divisor);
+#endif
+}
+
+std::optional<std::uint64_t> sample_from_bytes(std::span<const std::uint8_t> bytes,
+                                               std::size_t sample_index, std::size_t sample_bytes) {
+    const std::size_t byte_offset = sample_index * sample_bytes;
+    if (sample_bytes == 0u || byte_offset + sample_bytes > bytes.size() || sample_bytes > 8u) {
+        return std::nullopt;
+    }
+
+    std::uint64_t value = 0u;
+    for (std::size_t i = 0; i < sample_bytes; ++i) {
+        value |= static_cast<std::uint64_t>(bytes[byte_offset + i]) << (i * 8u);
+    }
+    return value;
+}
+
+thrystr::app::Scalar apply_value_mappers_scalar(thrystr::app::Scalar value,
+                                                std::span<const thrystr::ValueMapper> mappers) {
+    for (std::size_t index = 0; index < mappers.size(); ++index) {
+        const thrystr::ValueMapper& mapper = mappers[index];
+        if (!mapper.enabled) {
+            continue;
+        }
+
+        const thrystr::app::Scalar operand = static_cast<thrystr::app::Scalar>(mapper.operand);
+        switch (mapper.kind) {
+        case thrystr::ValueMapperKind::Add:
+            value += operand;
+            break;
+        case thrystr::ValueMapperKind::Subtract:
+            value -= operand;
+            break;
+        case thrystr::ValueMapperKind::Multiply:
+            value *= operand;
+            break;
+        case thrystr::ValueMapperKind::Divide:
+            if (std::abs(mapper.operand) <= 1.0e-12) {
+                throw std::invalid_argument("divide mapper operand must not be zero");
+            }
+            value /= operand;
+            break;
+        }
+
+        if (!scalar_isfinite(value)) {
+            throw std::invalid_argument("mapper stack produced a non-finite value at stage " +
+                                        std::to_string(index));
+        }
+    }
+    return value;
+}
+
+std::uint64_t wrap_sample_value(thrystr::app::Scalar value, std::uint8_t sample_bits) {
+    if (!scalar_isfinite(value)) {
+        throw std::invalid_argument("cannot wrap non-finite sample value");
+    }
+    const thrystr::app::Scalar modulus =
+        scalar_ldexp(static_cast<thrystr::app::Scalar>(1.0), sample_bits);
+    thrystr::app::Scalar wrapped = scalar_fmod(scalar_trunc(value), modulus);
+    if (wrapped < static_cast<thrystr::app::Scalar>(0.0)) {
+        wrapped += modulus;
+    }
+    if (wrapped <= static_cast<thrystr::app::Scalar>(0.0)) {
+        return 0u;
+    }
+    const std::uint64_t max_value = sample_bits == 64u ? std::numeric_limits<std::uint64_t>::max()
+                                                       : ((1ull << sample_bits) - 1ull);
+    const thrystr::app::Scalar max_scalar = static_cast<thrystr::app::Scalar>(max_value);
+    if (wrapped >= max_scalar) {
+        return max_value;
+    }
+    return static_cast<std::uint64_t>(wrapped);
+}
+
+std::uint64_t map_sample_to_wrapped(std::uint64_t sample, std::uint8_t sample_bits,
+                                    std::span<const thrystr::ValueMapper> mappers) {
+    const thrystr::app::Scalar mapped =
+        apply_value_mappers_scalar(static_cast<thrystr::app::Scalar>(sample), mappers);
+    return wrap_sample_value(mapped, sample_bits);
+}
+
+thrystr::app::Scalar sample_to_scalar(std::uint64_t sample, std::uint8_t sample_bits) {
+    const thrystr::app::Scalar denominator =
+        scalar_ldexp(static_cast<thrystr::app::Scalar>(1.0), sample_bits - 1);
+    return static_cast<thrystr::app::Scalar>(sample) / denominator -
+           static_cast<thrystr::app::Scalar>(1.0);
+}
+
+std::vector<thrystr::app::Scalar>
+map_source_bytes_to_scalars(std::span<const std::uint8_t> bytes, std::uint8_t sample_bits,
+                            std::span<const thrystr::ValueMapper> mappers) {
+    sample_bits = normalize_sample_bits(sample_bits);
+    const std::size_t sample_bytes = static_cast<std::size_t>(sample_bits / 8u);
+    const std::size_t sample_count = bytes.size() / sample_bytes;
+    std::vector<thrystr::app::Scalar> scalars;
+    scalars.reserve(sample_count);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        const std::optional<std::uint64_t> raw = sample_from_bytes(bytes, i, sample_bytes);
+        if (!raw) {
+            break;
+        }
+        const std::uint64_t mapped = map_sample_to_wrapped(*raw, sample_bits, mappers);
+        scalars.push_back(sample_to_scalar(mapped, sample_bits));
+    }
+    return scalars;
 }
 
 void clear_lazy_cache(AppState& state) {
@@ -960,8 +1129,7 @@ void clear_lazy_cache(AppState& state) {
     state.lazy_source_stream_path.clear();
 }
 
-std::vector<std::uint8_t> read_file_slice(const std::filesystem::path& path,
-                                          std::size_t offset,
+std::vector<std::uint8_t> read_file_slice(const std::filesystem::path& path, std::size_t offset,
                                           std::size_t length) {
     std::vector<std::uint8_t> bytes(length);
     if (length == 0u) {
@@ -985,17 +1153,36 @@ std::vector<std::uint8_t> read_file_slice(const std::filesystem::path& path,
     return bytes;
 }
 
-std::vector<std::uint8_t> read_lazy_file_slice(AppState& state,
-                                               const std::filesystem::path& path,
-                                               std::size_t offset,
-                                               std::size_t length) {
+std::vector<std::uint8_t> read_file_slice_from_stream(std::ifstream& input,
+                                                      const std::filesystem::path& path,
+                                                      std::size_t offset, std::size_t length) {
     std::vector<std::uint8_t> bytes(length);
     if (length == 0u) {
         return bytes;
     }
 
-    if (!state.lazy_source_stream.is_open() ||
-        state.lazy_source_stream_path != path) {
+    input.clear();
+    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!input) {
+        throw std::runtime_error("could not seek file: " + path.string());
+    }
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    const std::streamsize read_count = input.gcount();
+    if (read_count < 0) {
+        throw std::runtime_error("could not read file: " + path.string());
+    }
+    bytes.resize(static_cast<std::size_t>(read_count));
+    return bytes;
+}
+
+std::vector<std::uint8_t> read_lazy_file_slice(AppState& state, const std::filesystem::path& path,
+                                               std::size_t offset, std::size_t length) {
+    std::vector<std::uint8_t> bytes(length);
+    if (length == 0u) {
+        return bytes;
+    }
+
+    if (!state.lazy_source_stream.is_open() || state.lazy_source_stream_path != path) {
         if (state.lazy_source_stream.is_open()) {
             state.lazy_source_stream.close();
         }
@@ -1043,12 +1230,11 @@ const LazyBlock* find_lazy_block(const AppState& state, std::size_t block_index)
 
 void trim_lazy_cache(AppState& state) {
     while (state.lazy_blocks.size() > kLazyCacheMaxBlocks) {
-        const auto oldest = std::min_element(
-            state.lazy_blocks.begin(),
-            state.lazy_blocks.end(),
-            [](const LazyBlock& left, const LazyBlock& right) {
-                return left.last_used_frame < right.last_used_frame;
-            });
+        const auto oldest =
+            std::min_element(state.lazy_blocks.begin(), state.lazy_blocks.end(),
+                             [](const LazyBlock& left, const LazyBlock& right) {
+                                 return left.last_used_frame < right.last_used_frame;
+                             });
         if (oldest == state.lazy_blocks.end()) {
             return;
         }
@@ -1062,18 +1248,26 @@ void load_lazy_block(AppState& state, std::size_t block_index) {
     }
 
     const std::size_t count = source_sample_count(state);
-    const std::size_t block_size = lazy_block_bytes(state);
-    const std::size_t offset = block_index * block_size;
-    if (offset >= count) {
+    const std::size_t sample_bytes = data_sample_bytes(state);
+    const std::size_t block_samples = lazy_block_samples(state);
+    const std::size_t sample_offset = block_index * block_samples;
+    if (sample_offset >= count) {
         return;
     }
-    const std::size_t length = std::min(block_size, count - offset);
+    const std::size_t sample_length = std::min(block_samples, count - sample_offset);
+    const std::size_t byte_offset = sample_offset * sample_bytes;
+    const std::size_t byte_length = sample_length * sample_bytes;
 
     LazyBlock block;
     block.index = block_index;
-    block.offset = offset;
-    block.bytes = read_lazy_file_slice(state, state.analysis->source_path, offset, length);
-    block.mapped_bytes = thrystr::map_bytes_to_wrapped(block.bytes, state.mappers);
+    block.offset = sample_offset;
+    block.bytes =
+        read_lazy_file_slice(state, state.analysis->source_path, byte_offset, byte_length);
+    if (data_sample_bits(state) == 8u) {
+        block.mapped_bytes = thrystr::map_bytes_to_wrapped(block.bytes, state.mappers);
+    }
+    block.scalars =
+        map_source_bytes_to_scalars(block.bytes, data_sample_bits(state), state.mappers);
     block.last_used_frame = state.lazy_frame;
     state.lazy_blocks.push_back(std::move(block));
     trim_lazy_cache(state);
@@ -1085,12 +1279,13 @@ void seed_lazy_cache_from_analysis(AppState& state) {
         return;
     }
 
-    const std::size_t block_size = lazy_block_bytes(state);
     LazyBlock block;
-    block.index = state.analysis->window.offset / block_size;
-    block.offset = state.analysis->window.offset;
+    block.index = 0u;
+    block.offset = 0u;
     block.bytes = state.analysis->bytes;
     block.mapped_bytes = state.analysis->mapped_bytes;
+    block.scalars =
+        map_source_bytes_to_scalars(block.bytes, data_sample_bits(state), state.mappers);
     block.last_used_frame = ++state.lazy_frame;
     state.lazy_blocks.push_back(std::move(block));
     trim_lazy_cache(state);
@@ -1112,89 +1307,102 @@ void ensure_lazy_blocks(AppState& state, std::size_t first, std::size_t last) {
     }
 
     ++state.lazy_frame;
-    const std::size_t block_size = lazy_block_bytes(state);
-    const std::size_t first_block = first / block_size;
-    const std::size_t last_block = last / block_size;
+    const std::size_t block_samples = lazy_block_samples(state);
+    const std::size_t first_block = first / block_samples;
+    const std::size_t last_block = last / block_samples;
     const std::size_t prefetch_first = first_block == 0u ? 0u : first_block - 1u;
-    const std::size_t prefetch_last =
-        std::min((count - 1u) / block_size, last_block + 1u);
+    const std::size_t prefetch_last = std::min((count - 1u) / block_samples, last_block + 1u);
     for (std::size_t block = prefetch_first; block <= prefetch_last; ++block) {
         load_lazy_block(state, block);
     }
 }
 
-std::optional<std::uint8_t> raw_byte_at(const AppState& state, std::size_t index) {
+std::optional<std::uint64_t> raw_sample_at(const AppState& state, std::size_t index) {
     if (!state.analysis || index >= source_sample_count(state)) {
         return std::nullopt;
     }
 
-    const std::size_t block_size = lazy_block_bytes(state);
-    const std::size_t block_index = index / block_size;
+    const std::size_t sample_bytes = data_sample_bytes(state);
+    const std::size_t block_samples = lazy_block_samples(state);
+    const std::size_t block_index = index / block_samples;
     if (const LazyBlock* block = find_lazy_block(state, block_index)) {
         if (index >= block->offset) {
             const std::size_t local = index - block->offset;
-            if (local < block->bytes.size()) {
-                return block->bytes[local];
+            if (const std::optional<std::uint64_t> sample =
+                    sample_from_bytes(block->bytes, local, sample_bytes)) {
+                return sample;
             }
         }
     }
 
-    if (index >= state.analysis->window.offset) {
-        const std::size_t local = index - state.analysis->window.offset;
-        if (local < state.analysis->bytes.size()) {
-            return state.analysis->bytes[local];
+    if (index < state.analysis->bytes.size() / sample_bytes) {
+        if (const std::optional<std::uint64_t> sample =
+                sample_from_bytes(state.analysis->bytes, index, sample_bytes)) {
+            return sample;
         }
     }
     return std::nullopt;
 }
 
-std::optional<float> scalar_at(const AppState& state, std::size_t index) {
+std::optional<thrystr::app::Scalar> scalar_at(const AppState& state, std::size_t index) {
     if (!state.analysis || index >= source_sample_count(state)) {
         return std::nullopt;
     }
 
-    const std::size_t block_size = lazy_block_bytes(state);
-    const std::size_t block_index = index / block_size;
+    const std::size_t block_samples = lazy_block_samples(state);
+    const std::size_t block_index = index / block_samples;
     if (const LazyBlock* block = find_lazy_block(state, block_index)) {
         if (index >= block->offset) {
             const std::size_t local = index - block->offset;
-            if (local < block->mapped_bytes.size()) {
-                return thrystr::byte_to_scalar(block->mapped_bytes[local]);
+            if (local < block->scalars.size()) {
+                return block->scalars[local];
             }
         }
     }
 
-    if (index >= state.analysis->window.offset) {
-        const std::size_t local = index - state.analysis->window.offset;
-        if (local < state.analysis->scalars.size()) {
-            return state.analysis->scalars[local];
+    if (index < state.analysis->bytes.size() / data_sample_bytes(state)) {
+        const std::vector<thrystr::app::Scalar> scalars = map_source_bytes_to_scalars(
+            state.analysis->bytes, data_sample_bits(state), state.mappers);
+        if (index < scalars.size()) {
+            return scalars[index];
         }
     }
     return std::nullopt;
 }
 
-std::uint8_t byte_from_scalar(float scalar) {
-    const double scaled = (static_cast<double>(scalar) + 1.0) * 128.0;
-    return static_cast<std::uint8_t>(
-        std::clamp(std::llround(scaled), 0ll, 255ll));
+std::uint64_t sample_from_scalar(thrystr::app::Scalar scalar, std::uint8_t sample_bits) {
+    const thrystr::app::Scalar scaled =
+        (scalar + static_cast<thrystr::app::Scalar>(1.0)) *
+        scalar_ldexp(static_cast<thrystr::app::Scalar>(1.0), sample_bits - 1);
+    if (scaled <= 0.0) {
+        return 0u;
+    }
+    if (sample_bits == 64u &&
+        scaled >= static_cast<thrystr::app::Scalar>(std::numeric_limits<std::uint64_t>::max())) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    const auto rounded = static_cast<std::uint64_t>(static_cast<long double>(scaled));
+    const std::uint64_t max_value = sample_bits == 64u ? std::numeric_limits<std::uint64_t>::max()
+                                                       : ((1ull << sample_bits) - 1ull);
+    return std::min(rounded, max_value);
 }
 
-std::string hex_byte_text(std::uint8_t byte) {
-    char buffer[8] = {};
-    std::snprintf(buffer, sizeof(buffer), "%02X", static_cast<unsigned>(byte));
+std::string hex_sample_text(std::uint64_t sample, std::uint8_t sample_bits) {
+    char buffer[24] = {};
+    const int digits = sample_bits / 4;
+    std::snprintf(buffer, sizeof(buffer), "%0*llX", digits,
+                  static_cast<unsigned long long>(sample));
     return buffer;
 }
 
-template <typename T>
-void write_binary(std::ostream& output, const T& value) {
+template <typename T> void write_binary(std::ostream& output, const T& value) {
     output.write(reinterpret_cast<const char*>(&value), sizeof(T));
     if (!output) {
         throw std::runtime_error("could not write wave settings");
     }
 }
 
-template <typename T>
-T read_binary(std::istream& input) {
+template <typename T> T read_binary(std::istream& input) {
     T value{};
     input.read(reinterpret_cast<char*>(&value), sizeof(T));
     if (!input) {
@@ -1203,8 +1411,7 @@ T read_binary(std::istream& input) {
     return value;
 }
 
-template <typename T>
-void write_binary_le(std::ostream& output, const T& value) {
+template <typename T> void write_binary_le(std::ostream& output, const T& value) {
     std::array<unsigned char, sizeof(T)> bytes{};
     std::memcpy(bytes.data(), &value, sizeof(T));
     if constexpr (std::endian::native == std::endian::big) {
@@ -1217,11 +1424,9 @@ void write_binary_le(std::ostream& output, const T& value) {
     }
 }
 
-template <typename T>
-T read_binary_le(std::istream& input) {
+template <typename T> T read_binary_le(std::istream& input) {
     std::array<unsigned char, sizeof(T)> bytes{};
-    input.read(reinterpret_cast<char*>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!input) {
         throw std::runtime_error("could not read wave settings");
     }
@@ -1299,9 +1504,7 @@ std::size_t nice_tick(double raw) {
     return static_cast<std::size_t>(nice * exponent);
 }
 
-const char* entity_type_name(EntityType type) {
-    return type == EntityType::Data ? "data" : "wave";
-}
+const char* entity_type_name(EntityType type) { return type == EntityType::Data ? "data" : "wave"; }
 
 Entity* find_entity(AppState& state, int id) {
     for (Entity& entity : state.entities) {
@@ -1335,9 +1538,7 @@ double data_spatial_period_nm(const AppState& state) {
     return data ? std::max(0.000001, data->data.spatial_period_nm) : 1.0;
 }
 
-std::size_t scalar_count(const AppState& state) {
-    return source_sample_count(state);
-}
+std::size_t scalar_count(const AppState& state) { return source_sample_count(state); }
 
 std::size_t clamp_index(double value, std::size_t count) {
     if (count == 0u) {
@@ -1355,10 +1556,35 @@ void clamp_segment(AppState& state) {
         state.selection_drag_handle = 0;
         return;
     }
-    state.segment.selection_start =
-        std::min(state.segment.selection_start, count - 1u);
-    state.segment.selection_end =
-        std::min(state.segment.selection_end, count - 1u);
+    state.segment.selection_start = std::min(state.segment.selection_start, count - 1u);
+    state.segment.selection_end = std::min(state.segment.selection_end, count - 1u);
+    if (!state.segment.active) {
+        return;
+    }
+
+    const std::size_t min_length = std::min<std::size_t>(count, thrystr::app::kMinSegmentSize);
+    const std::size_t first = std::min(state.segment.selection_start, state.segment.selection_end);
+    const std::size_t last = std::max(state.segment.selection_start, state.segment.selection_end);
+    if (last - first + 1u >= min_length) {
+        return;
+    }
+
+    if (state.selection_drag_handle < 0) {
+        const std::size_t anchored_end = last;
+        const std::size_t expanded_start =
+            anchored_end + 1u >= min_length ? anchored_end + 1u - min_length : 0u;
+        state.segment.selection_start = expanded_start;
+        state.segment.selection_end = anchored_end;
+    } else {
+        const std::size_t anchored_start = first;
+        std::size_t expanded_end = std::min(count - 1u, anchored_start + min_length - 1u);
+        std::size_t expanded_start = anchored_start;
+        if (expanded_end - expanded_start + 1u < min_length) {
+            expanded_start = expanded_end + 1u >= min_length ? expanded_end + 1u - min_length : 0u;
+        }
+        state.segment.selection_start = expanded_start;
+        state.segment.selection_end = expanded_end;
+    }
 }
 
 std::pair<std::size_t, std::size_t> normalized_selection(const AppState& state) {
@@ -1444,9 +1670,8 @@ Entity& ensure_data_entity(AppState& state) {
     Entity entity;
     entity.id = state.next_entity_id++;
     entity.type = EntityType::Data;
-    entity.name = state.path[0] == '\0'
-        ? std::string("data")
-        : std::filesystem::path(state.path).filename().string();
+    entity.name = state.path[0] == '\0' ? std::string("data")
+                                        : std::filesystem::path(state.path).filename().string();
     entity.visible = true;
     state.entities.insert(state.entities.begin(), entity);
     return state.entities.front();
@@ -1496,9 +1721,7 @@ double wave_value_at_nm(const WaveEntity& wave, double x_nm) {
     return wave.amplitude_offset + wave.amplitude * ((std::sin(theta) + 1.0) * 0.5);
 }
 
-WaveFitResult score_wave_on_range(const AppState& state,
-                                  const WaveEntity& wave,
-                                  std::size_t first,
+WaveFitResult score_wave_on_range(const AppState& state, const WaveEntity& wave, std::size_t first,
                                   std::size_t last) {
     WaveFitResult score;
     score.wavelength_nm = wave.wavelength_nm;
@@ -1514,7 +1737,7 @@ WaveFitResult score_wave_on_range(const AppState& state,
     double error = 0.0;
     // Intersections only count at discrete data samples; drawn data lines are visual guides.
     for (std::size_t index = first; index <= last && index < count; index += stride) {
-        const std::optional<float> scalar = scalar_at(state, index);
+        const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, index);
         if (!scalar) {
             continue;
         }
@@ -1562,13 +1785,14 @@ WaveFitResult fit_wave_to_selection(const AppState& state, const WaveEntity& bas
     best.mean_error = DBL_MAX;
 
     for (int wi = 0; wi < kWaveFitWavelengthSteps; ++wi) {
-        const double t = kWaveFitWavelengthSteps > 1
-            ? static_cast<double>(wi) / static_cast<double>(kWaveFitWavelengthSteps - 1)
-            : 0.0;
+        const double t =
+            kWaveFitWavelengthSteps > 1
+                ? static_cast<double>(wi) / static_cast<double>(kWaveFitWavelengthSteps - 1)
+                : 0.0;
         const double wavelength = log_lerp(min_wavelength, max_wavelength, t);
         for (int pi = 0; pi < kWaveFitPhaseSteps; ++pi) {
-            const double phase_nm = wavelength * static_cast<double>(pi) /
-                                    static_cast<double>(kWaveFitPhaseSteps);
+            const double phase_nm =
+                wavelength * static_cast<double>(pi) / static_cast<double>(kWaveFitPhaseSteps);
             WaveEntity candidate = base_wave;
             candidate.wavelength_nm = wavelength;
             candidate.phase_nm = phase_nm;
@@ -1599,8 +1823,7 @@ void rebuild_wavelength_modifiers(const AppState& state, WaveEntity& wave) {
 
     for (std::size_t segment = 0; segment < segments; ++segment) {
         const std::size_t segment_first = first + (count * segment) / segments;
-        const std::size_t segment_last =
-            first + (count * (segment + 1u)) / segments - 1u;
+        const std::size_t segment_last = first + (count * (segment + 1u)) / segments - 1u;
         if (segment_last < segment_first) {
             continue;
         }
@@ -1614,8 +1837,9 @@ void rebuild_wavelength_modifiers(const AppState& state, WaveEntity& wave) {
 
         for (int step = 0; step < kWaveModifierWavelengthSteps; ++step) {
             const double t = kWaveModifierWavelengthSteps > 1
-                ? static_cast<double>(step) / static_cast<double>(kWaveModifierWavelengthSteps - 1)
-                : 0.0;
+                                 ? static_cast<double>(step) /
+                                       static_cast<double>(kWaveModifierWavelengthSteps - 1)
+                                 : 0.0;
             const double target = log_lerp(min_target, max_target, t);
             WaveEntity candidate = wave;
             candidate.wavelength_modifiers.push_back({key_nm, target - current_wavelength});
@@ -1640,19 +1864,17 @@ void create_interpolated_wave(AppState& state) {
     wave.wave.wavelength_nm = fit.wavelength_nm;
     wave.wave.phase_nm = fit.phase_nm;
     rebuild_wavelength_modifiers(state, wave.wave);
-    const WaveFitResult final_fit = score_wave_on_range(
-        state, wave.wave, analysis_selection_bounds(state).first,
-        analysis_selection_bounds(state).second);
-    state.status = "Created interpolated wave: " +
-                   format_count(final_fit.hits) + "/" +
+    const WaveFitResult final_fit =
+        score_wave_on_range(state, wave.wave, analysis_selection_bounds(state).first,
+                            analysis_selection_bounds(state).second);
+    state.status = "Created interpolated wave: " + format_count(final_fit.hits) + "/" +
                    format_count(final_fit.tested) + " point hits, " +
                    format_count(wave.wave.wavelength_modifiers.size()) + " wavelength keys";
 }
 
-std::vector<float> collect_scalars_for_range(AppState& state,
-                                              std::size_t first,
-                                              std::size_t last) {
-    std::vector<float> scalars;
+std::vector<thrystr::app::Scalar> collect_scalars_for_range(AppState& state, std::size_t first,
+                                                            std::size_t last) {
+    std::vector<thrystr::app::Scalar> scalars;
     const std::size_t count = source_sample_count(state);
     if (!state.analysis || count == 0u || last < first) {
         return scalars;
@@ -1660,7 +1882,7 @@ std::vector<float> collect_scalars_for_range(AppState& state,
     first = std::min(first, count - 1u);
     last = std::min(last, count - 1u);
     scalars.reserve(last - first + 1u);
-    const std::size_t block_size = lazy_block_bytes(state);
+    const std::size_t block_size = lazy_block_samples(state);
     for (std::size_t block_first = first; block_first <= last;) {
         const std::size_t block_last =
             std::min(last, ((block_first / block_size) + 1u) * block_size - 1u);
@@ -1676,44 +1898,255 @@ std::vector<float> collect_scalars_for_range(AppState& state,
     return scalars;
 }
 
-std::vector<thrystr::app::Section> data_sections_from_workspace(
-    const thrystr::app::WorkspaceModel& workspace) {
-    std::vector<thrystr::app::Section> sections;
-    for (const thrystr::app::Track& track : workspace.tracks) {
-        if (track.kind != thrystr::app::TrackKind::Data) {
+struct TrackAutoFitRange {
+    std::size_t start = 0;
+    std::size_t length = 0;
+};
+
+std::vector<TrackAutoFitRange> build_track_auto_fit_ranges(std::size_t sample_count,
+                                                           std::size_t target_length) {
+    std::vector<TrackAutoFitRange> ranges;
+    if (sample_count == 0u) {
+        return ranges;
+    }
+
+    const std::size_t min_length = std::min(sample_count, thrystr::app::kMinSegmentSize);
+    target_length = std::max(min_length, target_length);
+    if (sample_count <= target_length) {
+        ranges.push_back({0u, sample_count});
+        return ranges;
+    }
+
+    std::size_t start = 0u;
+    while (sample_count - start > target_length + min_length) {
+        ranges.push_back({start, target_length});
+        start += target_length;
+    }
+    ranges.push_back({start, sample_count - start});
+    return ranges;
+}
+
+thrystr::app::WorkspaceModel make_track_auto_fit_workspace(std::uint8_t data_track_count) {
+    thrystr::app::WorkspaceModel workspace;
+    workspace.active_track_id = 0u;
+    workspace.parity_track_id = data_track_count;
+    workspace.tracks.reserve(static_cast<std::size_t>(data_track_count) + 1u);
+
+    for (std::uint8_t id = 0u; id < data_track_count; ++id) {
+        thrystr::app::Track track;
+        track.id = id;
+        track.kind = thrystr::app::TrackKind::Data;
+        track.name = "data track " + std::to_string(static_cast<unsigned>(id));
+        track.visible = false;
+        workspace.tracks.push_back(std::move(track));
+    }
+
+    thrystr::app::Track parity;
+    parity.id = data_track_count;
+    parity.kind = thrystr::app::TrackKind::Parity;
+    parity.name = "parity";
+    workspace.tracks.push_back(std::move(parity));
+    return workspace;
+}
+
+thrystr::app::Section offset_section(thrystr::app::Section section, std::size_t offset) {
+    section.start_index += static_cast<std::uint32_t>(offset);
+    return section;
+}
+
+void merge_owned_mask(std::span<std::uint8_t> global_mask, std::span<const std::uint8_t> local_mask,
+                      std::size_t start_offset, std::size_t local_count) {
+    if (global_mask.empty() || local_mask.empty() || local_count == 0u) {
+        return;
+    }
+
+    if (start_offset % 8u == 0u) {
+        const std::size_t byte_offset = start_offset / 8u;
+        if (byte_offset >= global_mask.size()) {
+            return;
+        }
+        const std::size_t byte_count =
+            std::min(local_mask.size(), global_mask.size() - byte_offset);
+        for (std::size_t i = 0; i < byte_count; ++i) {
+            global_mask[byte_offset + i] |= local_mask[i];
+        }
+        return;
+    }
+
+    for (std::size_t local_index = 0; local_index < local_count; ++local_index) {
+        if (thrystr::app::get_owned_bit(local_mask, local_index)) {
+            thrystr::app::set_owned_bit(global_mask, start_offset + local_index, true);
+        }
+    }
+}
+
+void accumulate_validation(thrystr::app::ValidationReport& aggregate,
+                           const thrystr::app::ValidationReport& segment,
+                           std::size_t start_offset) {
+    const double residual_sum =
+        aggregate.mean_residual * static_cast<double>(aggregate.checked_samples) +
+        segment.mean_residual * static_cast<double>(segment.checked_samples);
+    aggregate.max_residual = std::max(aggregate.max_residual, segment.max_residual);
+    aggregate.checked_samples += segment.checked_samples;
+    aggregate.mean_residual = aggregate.checked_samples == 0u
+                                  ? 0.0
+                                  : residual_sum / static_cast<double>(aggregate.checked_samples);
+    if (!segment.pass) {
+        aggregate.pass = false;
+    }
+    for (thrystr::app::ValidationIssue issue : segment.issues) {
+        if (aggregate.issues.size() >= kMaxFitValidationIssues) {
+            break;
+        }
+        issue.sample_index += start_offset;
+        aggregate.issues.push_back(std::move(issue));
+    }
+}
+
+void apply_segment_fit_patch(AppState& state, SegmentFitPatch&& patch) {
+    if (!state.fitted_workspace_valid || state.fitted_workspace.tracks.empty()) {
+        state.fitted_workspace = make_track_auto_fit_workspace(kTrackAutoFitMaxDataTracks);
+        state.fitted_workspace_valid = true;
+        state.fitted_workspace_used_parity = true;
+    }
+
+    for (const thrystr::app::Track& patch_track : patch.workspace.tracks) {
+        const std::uint8_t target_id = patch_track.kind == thrystr::app::TrackKind::Parity
+                                           ? state.fitted_workspace.parity_track_id
+                                           : patch_track.id;
+        thrystr::app::Track* target = thrystr::app::find_track(state.fitted_workspace, target_id);
+        if (!target) {
             continue;
         }
-        sections.insert(sections.end(), track.sections.begin(), track.sections.end());
-    }
-    std::sort(sections.begin(), sections.end(), [](const auto& left, const auto& right) {
-        if (left.start_index != right.start_index) {
-            return left.start_index < right.start_index;
+
+        if (patch_track.kind == thrystr::app::TrackKind::Parity) {
+            for (const thrystr::app::Section& section : patch_track.sections) {
+                target->sections.push_back(offset_section(section, patch.start_offset));
+            }
+            continue;
         }
-        return left.length < right.length;
-    });
-    return sections;
+
+        if (patch_track.kind != thrystr::app::TrackKind::Data) {
+            continue;
+        }
+        if (target->owned_mask.empty()) {
+            thrystr::app::reset_owned_mask(target->owned_mask, source_sample_count(state));
+        }
+        for (const thrystr::app::Section& section : patch_track.sections) {
+            const thrystr::app::Section global_section =
+                offset_section(section, patch.start_offset);
+            target->sections.push_back(global_section);
+            state.fitted_sections.push_back(global_section);
+        }
+        if (!patch_track.sections.empty()) {
+            target->visible = true;
+        }
+        merge_owned_mask(target->owned_mask, patch_track.owned_mask, patch.start_offset,
+                         patch.sample_count);
+    }
+
+    state.fitted_workspace_used_parity =
+        state.fitted_workspace.parity_track_id != thrystr::app::kNoParityTrack;
+    accumulate_validation(state.fit_validation, patch.validation, patch.start_offset);
 }
 
-void store_multi_track_job_result(AutoFitJob& job,
-                                  thrystr::app::MultiTrackFitResult fit,
-                                  thrystr::app::ValidationReport validation) {
-    std::vector<thrystr::app::Section> sections = data_sections_from_workspace(fit.workspace);
-    const bool used_parity = fit.used_parity;
-    const bool cancelled = fit.cancelled;
-    std::scoped_lock lock(job.result_mutex);
-    job.workspace = std::move(fit.workspace);
-    job.sections = std::move(sections);
-    job.validation = std::move(validation);
-    job.used_parity = used_parity;
-    job.cancelled = cancelled;
+std::size_t data_track_count(const thrystr::app::WorkspaceModel& workspace) {
+    return static_cast<std::size_t>(std::count_if(
+        workspace.tracks.begin(), workspace.tracks.end(), [](const thrystr::app::Track& track) {
+            return track.kind == thrystr::app::TrackKind::Data && !track.sections.empty();
+        }));
 }
 
-void store_single_track_job_result(AutoFitJob& job,
-                                   thrystr::app::ConvergentFitResult fit) {
+std::size_t data_track_span(const thrystr::app::WorkspaceModel& workspace) {
+    std::size_t span = 0u;
+    for (const thrystr::app::Track& track : workspace.tracks) {
+        if (track.kind != thrystr::app::TrackKind::Data || track.sections.empty()) {
+            continue;
+        }
+        span = std::max(span, static_cast<std::size_t>(track.id) + 1u);
+    }
+    return span;
+}
+
+EncodingEstimate estimate_encoded_output_size(const AppState& state) {
+    EncodingEstimate estimate;
+    estimate.source_bytes =
+        state.analysis ? static_cast<std::size_t>(std::min<std::uintmax_t>(
+                             state.analysis->source_size,
+                             static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())))
+                       : 0u;
+    estimate.covered_samples = state.fit_validation.checked_samples;
+
+    if (!state.fitted_workspace_valid || state.fitted_workspace.tracks.empty()) {
+        return estimate;
+    }
+
+    estimate.encoded_bytes = kEncodedWorkspaceHeaderBytes;
+    for (const thrystr::app::Track& track : state.fitted_workspace.tracks) {
+        if (track.kind == thrystr::app::TrackKind::Data && track.sections.empty()) {
+            continue;
+        }
+        if (track.kind == thrystr::app::TrackKind::Parity && track.sections.empty()) {
+            continue;
+        }
+        estimate.encoded_bytes += kEncodedTrackHeaderBytes;
+        estimate.encoded_bytes += track.sections.size() * kEncodedSectionBytes;
+        estimate.curve_points += track.sections.size() * 2u;
+        if (track.kind == thrystr::app::TrackKind::Data) {
+            ++estimate.data_tracks;
+            estimate.data_sections += track.sections.size();
+        } else if (track.kind == thrystr::app::TrackKind::Parity) {
+            estimate.parity_sections += track.sections.size();
+        }
+    }
+
+    if (estimate.covered_samples == 0u) {
+        for (const thrystr::app::Section& section : state.fitted_sections) {
+            estimate.covered_samples += section.length;
+        }
+    }
+    if (estimate.source_bytes > 0u) {
+        estimate.source_ratio = static_cast<double>(estimate.encoded_bytes) /
+                                static_cast<double>(estimate.source_bytes);
+    }
+    const std::size_t covered_bytes = estimate.covered_samples * data_sample_bytes(state);
+    if (covered_bytes > 0u) {
+        estimate.covered_ratio =
+            static_cast<double>(estimate.encoded_bytes) / static_cast<double>(covered_bytes);
+    }
+    return estimate;
+}
+
+const char* encoding_target_label(double ratio) {
+    if (ratio <= 0.0) {
+        return "no fit";
+    }
+    if (ratio < 0.05) {
+        return "under target";
+    }
+    if (ratio <= 0.20) {
+        return "target";
+    }
+    return "over target";
+}
+
+void store_single_track_job_result(AutoFitJob& job, thrystr::app::ConvergentFitResult fit) {
     const bool cancelled = fit.cancelled;
     std::scoped_lock lock(job.result_mutex);
     job.sections = std::move(fit.sections);
     job.cancelled = cancelled;
+}
+
+void store_segment_fit_patch(AutoFitJob& job, SegmentFitPatch patch) {
+    std::scoped_lock lock(job.result_mutex);
+    job.processed_samples += patch.sample_count;
+    job.completed_segments = std::max(job.completed_segments, patch.segment_index + 1u);
+    job.used_parity = job.used_parity || patch.used_parity;
+    job.cancelled = job.cancelled || patch.cancelled;
+    job.progress_label = "segment " + format_count(job.completed_segments) + "/" +
+                         format_count(std::max<std::size_t>(1u, job.total_segments));
+    job.pending_patches.push_back(std::move(patch));
+    job.partial_dirty = true;
 }
 
 void store_auto_fit_job_error(AutoFitJob& job, std::string message) {
@@ -1741,49 +2174,174 @@ thrystr::app::ValidationReport validate_fitted_sections(AppState& state) {
         const thrystr::app::Section& section = sorted[section_index];
         if (section.start_index != expected_start) {
             report.pass = false;
-            report.issues.push_back(
-                {"fitted section coverage has a gap or overlap", 0, section_index,
-                 static_cast<std::size_t>(expected_start)});
+            report.issues.push_back({"fitted section coverage has a gap or overlap", 0,
+                                     section_index, static_cast<std::size_t>(expected_start)});
             expected_start = section.start_index;
         }
         if (section.length == 0u) {
             report.pass = false;
-            report.issues.push_back({"fitted section has zero length", 0, section_index,
-                                     section.start_index});
+            report.issues.push_back(
+                {"fitted section has zero length", 0, section_index, section.start_index});
             continue;
         }
         const std::size_t section_last =
             static_cast<std::size_t>(thrystr::app::section_end(section) - 1u);
         ensure_lazy_blocks(state, section.start_index, section_last);
-        for (std::size_t index = section.start_index;
-             index < thrystr::app::section_end(section);
+        for (std::size_t index = section.start_index; index < thrystr::app::section_end(section);
              ++index) {
-            const std::optional<float> scalar = scalar_at(state, index);
+            const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, index);
             if (!scalar) {
                 report.pass = false;
-                report.issues.push_back({"fitted section sample is not loaded", 0,
-                                         section_index, index});
+                report.issues.push_back(
+                    {"fitted section sample is not loaded", 0, section_index, index});
                 continue;
             }
             const double residual =
-                std::abs(thrystr::app::wave_value_at_index(section, index) -
+                std::abs(static_cast<double>(thrystr::app::wave_value_at_index(section, index)) -
                          static_cast<double>(*scalar));
             report.max_residual = std::max(report.max_residual, residual);
             residual_sum += residual;
             ++residual_count;
             if (residual > section.fit_tolerance) {
                 report.pass = false;
-                report.issues.push_back({"fitted section residual exceeds tolerance", 0,
-                                         section_index, index});
+                report.issues.push_back(
+                    {"fitted section residual exceeds tolerance", 0, section_index, index});
             }
         }
         expected_start = thrystr::app::section_end(section);
     }
     report.checked_samples = residual_count;
-    report.mean_residual = residual_count == 0u
-        ? 0.0
-        : residual_sum / static_cast<double>(residual_count);
+    report.mean_residual =
+        residual_count == 0u ? 0.0 : residual_sum / static_cast<double>(residual_count);
     return report;
+}
+
+std::vector<thrystr::app::Scalar>
+load_track_auto_fit_scalars(std::ifstream& input, const std::filesystem::path& path,
+                            const std::vector<thrystr::ValueMapper>& mappers,
+                            const TrackAutoFitRange& range, std::uint8_t sample_bits) {
+    std::vector<std::uint8_t> bytes = read_file_slice_from_stream(
+        input, path, range.start * static_cast<std::size_t>(sample_bits / 8u),
+        range.length * static_cast<std::size_t>(sample_bits / 8u));
+    return map_source_bytes_to_scalars(bytes, sample_bits, mappers);
+}
+
+void run_track_auto_fit_worker(AutoFitJob& job, std::filesystem::path source_path,
+                               std::vector<thrystr::ValueMapper> mappers,
+                               std::vector<TrackAutoFitRange> ranges, double tolerance,
+                               double spacing_nm, std::size_t max_section_length,
+                               std::uint8_t sample_bits) {
+    try {
+        std::ifstream input(source_path, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("could not open file: " + source_path.string());
+        }
+
+        for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {
+            if (job.cancel_requested.load()) {
+                std::scoped_lock lock(job.result_mutex);
+                job.cancelled = true;
+                break;
+            }
+
+            const TrackAutoFitRange& range = ranges[segment_index];
+            std::vector<thrystr::app::Scalar> samples =
+                load_track_auto_fit_scalars(input, source_path, mappers, range, sample_bits);
+            if (samples.empty()) {
+                continue;
+            }
+
+            thrystr::app::MultiTrackOptions track_options;
+            track_options.tolerance = tolerance;
+            track_options.default_spacing_nm = spacing_nm;
+            track_options.max_section_length = std::min(max_section_length, samples.size());
+            track_options.min_segment_length =
+                std::min<std::size_t>(thrystr::app::kMinSegmentSize, samples.size());
+            track_options.min_data_tracks = kTrackAutoFitMinDataTracks;
+            track_options.max_data_tracks = kTrackAutoFitMaxDataTracks;
+            track_options.allow_single_track_fallback = false;
+            track_options.cancel_requested = &job.cancel_requested;
+
+            thrystr::app::MultiTrackFitResult fit =
+                thrystr::app::fit_multi_track_sections(samples, track_options);
+            if (fit.cancelled) {
+                std::scoped_lock lock(job.result_mutex);
+                job.cancelled = true;
+                break;
+            }
+
+            thrystr::app::ValidationReport validation =
+                thrystr::app::validate_tracks(samples, fit.workspace, track_options.parity_margin);
+            SegmentFitPatch patch;
+            patch.start_offset = range.start;
+            patch.sample_count = samples.size();
+            patch.segment_index = segment_index;
+            patch.workspace = std::move(fit.workspace);
+            patch.validation = std::move(validation);
+            patch.used_parity = fit.used_parity;
+            patch.cancelled = fit.cancelled;
+            store_segment_fit_patch(job, std::move(patch));
+        }
+    } catch (const std::exception& error) {
+        store_auto_fit_job_error(job, error.what());
+    }
+    job.done.store(true);
+}
+
+void apply_auto_fit_partial_if_ready(AppState& state) {
+    AutoFitJob& job = state.auto_fit_job;
+    if (!job.running.load() || !job.multi_track) {
+        return;
+    }
+
+    std::vector<SegmentFitPatch> patches;
+    std::size_t processed_samples = 0u;
+    std::size_t total_samples = 0u;
+    std::size_t completed_segments = 0u;
+    std::size_t total_segments = 0u;
+    std::string progress_label;
+    bool cancelled = false;
+    {
+        std::scoped_lock lock(job.result_mutex);
+        if (!job.partial_dirty && job.pending_patches.empty()) {
+            return;
+        }
+        patches = std::move(job.pending_patches);
+        job.pending_patches.clear();
+        job.partial_dirty = false;
+        processed_samples = job.processed_samples;
+        total_samples = job.total_samples;
+        completed_segments = job.completed_segments;
+        total_segments = job.total_segments;
+        progress_label = job.progress_label;
+        cancelled = job.cancelled;
+    }
+
+    for (SegmentFitPatch& patch : patches) {
+        apply_segment_fit_patch(state, std::move(patch));
+    }
+
+    if (total_samples > 0u) {
+        state.segment.active = true;
+        state.segment.selection_start = 0u;
+        state.segment.selection_end = total_samples - 1u;
+    }
+    state.show_reconstruction_only = true;
+    state.status = "Track auto-fit building " +
+                   (progress_label.empty() ? std::string("segments") : progress_label) + ": " +
+                   format_count(processed_samples) + "/" + format_count(total_samples) + " samples";
+    if (total_segments > 0u) {
+        state.status += " (" + format_count(completed_segments) + "/" +
+                        format_count(total_segments) + " segments)";
+    }
+    const EncodingEstimate encoding = estimate_encoded_output_size(state);
+    if (encoding.encoded_bytes > 0u) {
+        state.status += ", encoded " + format_bytes(encoding.encoded_bytes) + " (" +
+                        format_percent(encoding.source_ratio) + " of source)";
+    }
+    if (cancelled) {
+        state.status += " cancelling";
+    }
 }
 
 void auto_fit_current_range(AppState& state, bool multi_track = false) {
@@ -1799,24 +2357,6 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
         state.auto_fit_job.worker.join();
     }
 
-    const auto [first, requested_last] = analysis_selection_bounds(state);
-    if (multi_track && first != 0u) {
-        state.status = "Track auto-fit currently starts at source index 0";
-        return;
-    }
-    const std::size_t capped_last =
-        std::min(requested_last, first + kAutoFitMaxSamples - 1u);
-    std::vector<float> scalars = collect_scalars_for_range(state, first, capped_last);
-    if (scalars.empty()) {
-        state.status = "No scalar samples available for auto-fit";
-        return;
-    }
-
-    thrystr::app::ConvergentFitOptions options;
-    options.tolerance = std::max(1.0e-9, static_cast<double>(state.wave_tolerance));
-    options.default_spacing_nm = data_spatial_period_nm(state);
-    options.max_section_length = std::min<std::size_t>(4096u, scalars.size());
-
     AutoFitJob& job = state.auto_fit_job;
     job.cancel_requested.store(false);
     job.done.store(false);
@@ -1824,45 +2364,104 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
     job.cancelled = false;
     job.multi_track = multi_track;
     job.used_parity = false;
-    job.start_offset = first;
-    job.requested_last = requested_last;
-    job.capped_last = capped_last;
+    job.partial_dirty = false;
+    job.start_offset = 0u;
+    job.requested_last = 0u;
+    job.capped_last = 0u;
+    job.processed_samples = 0u;
+    job.total_samples = 0u;
+    job.completed_segments = 0u;
+    job.total_segments = 0u;
+    job.progress_label.clear();
     job.error.clear();
     {
         std::scoped_lock lock(job.result_mutex);
         job.sections.clear();
         job.workspace = {};
         job.validation = {};
+        job.pending_patches.clear();
     }
 
-    state.status = std::string(multi_track ? "Track auto-fit running on "
-                                           : "Auto-fit running on ") +
-                   format_count(scalars.size()) + " samples";
-    job.worker = std::thread([&job,
-                              samples = std::move(scalars),
-                              multi_track,
-                              options]() mutable {
+    const double tolerance = std::max(1.0e-9, static_cast<double>(state.wave_tolerance));
+    const double spacing_nm = data_spatial_period_nm(state);
+    if (multi_track) {
+        const std::size_t count = source_sample_count(state);
+        const std::size_t target_length =
+            std::max<std::size_t>(lazy_block_samples(state), thrystr::app::kMinSegmentSize);
+        std::vector<TrackAutoFitRange> ranges = build_track_auto_fit_ranges(count, target_length);
+        if (ranges.empty() || state.analysis->source_path.empty()) {
+            job.running.store(false);
+            state.status = "Track auto-fit needs a source file";
+            return;
+        }
+
         try {
-            if (multi_track) {
-                thrystr::app::MultiTrackOptions track_options;
-                track_options.tolerance = options.tolerance;
-                track_options.default_spacing_nm = options.default_spacing_nm;
-                track_options.max_section_length = options.max_section_length;
-                track_options.max_data_tracks = 8u;
-                track_options.cancel_requested = &job.cancel_requested;
-                const thrystr::app::MultiTrackFitResult fit =
-                    thrystr::app::fit_multi_track_sections(samples, track_options);
-                const thrystr::app::ValidationReport validation =
-                    thrystr::app::validate_tracks(samples,
-                                                  fit.workspace,
-                                                  track_options.parity_margin);
-                store_multi_track_job_result(job, std::move(fit), std::move(validation));
-            } else {
-                options.cancel_requested = &job.cancel_requested;
-                const thrystr::app::ConvergentFitResult fit =
-                    thrystr::app::fit_convergent_sections(samples, options);
-                store_single_track_job_result(job, std::move(fit));
-            }
+            state.fitted_workspace = make_track_auto_fit_workspace(kTrackAutoFitMaxDataTracks);
+        } catch (const std::exception& error) {
+            job.running.store(false);
+            state.status =
+                std::string("Track auto-fit workspace allocation failed: ") + error.what();
+            return;
+        }
+        state.fitted_sections.clear();
+        state.fitted_workspace_valid = true;
+        state.fitted_workspace_used_parity = true;
+        state.fit_validation = {};
+        state.show_fit_validation = false;
+        state.show_reconstruction_only = true;
+        state.segment.active = true;
+        state.segment.selection_start = 0u;
+        state.segment.selection_end = count - 1u;
+
+        job.start_offset = 0u;
+        job.requested_last = count - 1u;
+        job.capped_last = count - 1u;
+        job.total_samples = count;
+        job.total_segments = ranges.size();
+        job.progress_label = "segment 0/" + format_count(ranges.size());
+        state.status =
+            "Track auto-fit segmenting whole file: 0/" + format_count(ranges.size()) + " segments";
+
+        const std::filesystem::path source_path = state.analysis->source_path;
+        std::vector<thrystr::ValueMapper> mappers = state.mappers;
+        const std::uint8_t sample_bits = data_sample_bits(state);
+        job.worker =
+            std::thread([&job, source_path, mappers = std::move(mappers),
+                         ranges = std::move(ranges), tolerance, spacing_nm, sample_bits]() mutable {
+                run_track_auto_fit_worker(job, source_path, std::move(mappers), std::move(ranges),
+                                          tolerance, spacing_nm, kAutoFitMaxSamples, sample_bits);
+            });
+        return;
+    }
+
+    clamp_segment(state);
+    const auto [first, requested_last] = analysis_selection_bounds(state);
+    const std::size_t capped_last = std::min(requested_last, first + kAutoFitMaxSamples - 1u);
+    std::vector<thrystr::app::Scalar> scalars =
+        collect_scalars_for_range(state, first, capped_last);
+    if (scalars.empty()) {
+        job.running.store(false);
+        state.status = "No scalar samples available for auto-fit";
+        return;
+    }
+
+    thrystr::app::ConvergentFitOptions options;
+    options.tolerance = tolerance;
+    options.default_spacing_nm = spacing_nm;
+    options.max_section_length = std::min<std::size_t>(4096u, scalars.size());
+
+    job.start_offset = first;
+    job.requested_last = requested_last;
+    job.capped_last = capped_last;
+    job.total_samples = scalars.size();
+
+    state.status = "Auto-fit running on " + format_count(scalars.size()) + " samples";
+    job.worker = std::thread([&job, samples = std::move(scalars), options]() mutable {
+        try {
+            options.cancel_requested = &job.cancel_requested;
+            const thrystr::app::ConvergentFitResult fit =
+                thrystr::app::fit_convergent_sections(samples, options);
+            store_single_track_job_result(job, std::move(fit));
         } catch (const std::exception& error) {
             store_auto_fit_job_error(job, error.what());
         }
@@ -1880,6 +2479,7 @@ void cancel_auto_fit(AppState& state) {
 
 void finish_auto_fit_if_ready(AppState& state) {
     AutoFitJob& job = state.auto_fit_job;
+    apply_auto_fit_partial_if_ready(state);
     if (!job.running.load() || !job.done.load()) {
         return;
     }
@@ -1888,8 +2488,6 @@ void finish_auto_fit_if_ready(AppState& state) {
     }
 
     std::vector<thrystr::app::Section> sections;
-    thrystr::app::WorkspaceModel workspace;
-    thrystr::app::ValidationReport validation;
     bool cancelled = false;
     bool multi_track = false;
     bool used_parity = false;
@@ -1897,8 +2495,6 @@ void finish_auto_fit_if_ready(AppState& state) {
     {
         std::scoped_lock lock(job.result_mutex);
         sections = job.sections;
-        workspace = job.workspace;
-        validation = job.validation;
         cancelled = job.cancelled;
         multi_track = job.multi_track;
         used_parity = job.used_parity;
@@ -1912,16 +2508,18 @@ void finish_auto_fit_if_ready(AppState& state) {
         return;
     }
 
-    state.fitted_sections = std::move(sections);
-    for (thrystr::app::Section& section : state.fitted_sections) {
-        section.start_index += static_cast<std::uint32_t>(job.start_offset);
-    }
-    if (multi_track && !workspace.tracks.empty()) {
-        state.fitted_workspace = std::move(workspace);
-        state.fitted_workspace_valid = true;
-        state.fitted_workspace_used_parity = used_parity;
-        state.fit_validation = validation;
+    const std::size_t local_count =
+        job.capped_last >= job.start_offset ? job.capped_last - job.start_offset + 1u : 0u;
+    if (multi_track) {
+        state.fitted_workspace_valid = !state.fitted_workspace.tracks.empty();
+        state.fitted_workspace_used_parity =
+            used_parity || state.fitted_workspace.parity_track_id != thrystr::app::kNoParityTrack;
+        used_parity = state.fitted_workspace_used_parity;
     } else {
+        state.fitted_sections = std::move(sections);
+        for (thrystr::app::Section& section : state.fitted_sections) {
+            section.start_index += static_cast<std::uint32_t>(job.start_offset);
+        }
         state.fitted_workspace = {};
         thrystr::app::Track track;
         track.id = 0u;
@@ -1935,16 +2533,28 @@ void finish_auto_fit_if_ready(AppState& state) {
         state.fitted_workspace_used_parity = false;
         state.fit_validation = validate_fitted_sections(state);
     }
+    if (local_count > 0u) {
+        state.segment.active = true;
+        state.segment.selection_start = job.start_offset;
+        state.segment.selection_end = job.capped_last;
+        clamp_segment(state);
+    }
     state.show_reconstruction_only = true;
-    state.status = std::string(cancelled ? "Auto-fit cancelled: "
-                                         : multi_track ? "Track auto-fit: "
-                                                       : "Auto-fit: ") +
+    state.status = std::string(cancelled     ? (multi_track ? "Track auto-fit cancelled: "
+                                                            : "Auto-fit cancelled: ")
+                               : multi_track ? "Track auto-fit: "
+                                             : "Auto-fit: ") +
                    format_count(state.fitted_sections.size()) + " sections, " +
-                   format_count(state.fit_validation.checked_samples) +
-                   " samples, max residual " +
+                   format_count(state.fit_validation.checked_samples) + " samples, max residual " +
                    std::to_string(state.fit_validation.max_residual);
     if (multi_track) {
+        state.status += ", " + format_count(data_track_count(state.fitted_workspace)) + " tracks";
         state.status += used_parity ? " + parity" : " single-track fallback";
+    }
+    const EncodingEstimate encoding = estimate_encoded_output_size(state);
+    if (encoding.encoded_bytes > 0u) {
+        state.status += ", encoded " + format_bytes(encoding.encoded_bytes) + " (" +
+                        format_percent(encoding.source_ratio) + " of source)";
     }
     if (job.requested_last != job.capped_last) {
         state.status += " (range capped)";
@@ -1960,13 +2570,11 @@ bool should_defer_phase_fit_on_load(const std::filesystem::path& path) {
 }
 
 thrystr::Analysis load_lazy_analysis_window(const std::filesystem::path& path,
-                                            std::size_t block_bytes,
-                                            float max_slope,
-                                            double wave_scale,
-                                            double wave_tolerance,
-                                            int phase_steps,
-                                            std::size_t max_phase_test_points,
-                                            std::span<const thrystr::ValueMapper> mappers) {
+                                            std::size_t block_bytes, float max_slope,
+                                            double wave_scale, double wave_tolerance,
+                                            int phase_steps, std::size_t max_phase_test_points,
+                                            std::span<const thrystr::ValueMapper> mappers,
+                                            std::uint8_t sample_bits) {
     std::error_code error;
     const std::uintmax_t file_size = std::filesystem::file_size(path, error);
     if (error) {
@@ -1985,34 +2593,38 @@ thrystr::Analysis load_lazy_analysis_window(const std::filesystem::path& path,
     }
 
     const std::size_t source_size = static_cast<std::size_t>(file_size);
-    const std::size_t length = std::min(block_bytes, source_size);
+    const std::size_t sample_bytes =
+        static_cast<std::size_t>(normalize_sample_bits(sample_bits) / 8u);
+    const std::size_t length = (std::min(block_bytes, source_size) / sample_bytes) * sample_bytes;
     analysis.bytes = read_file_slice(path, 0u, length);
-    analysis.mapped_bytes = thrystr::map_bytes_to_wrapped(analysis.bytes, mappers);
-    analysis.scalars = thrystr::map_bytes_to_scalars(analysis.mapped_bytes);
-    analysis.window = thrystr::find_highest_entropy_window(
-        analysis.mapped_bytes,
-        analysis.mapped_bytes.size());
+    if (normalize_sample_bits(sample_bits) == 8u) {
+        analysis.mapped_bytes = thrystr::map_bytes_to_wrapped(analysis.bytes, mappers);
+    } else {
+        analysis.mapped_bytes = analysis.bytes;
+    }
+    const std::vector<thrystr::app::Scalar> source_scalars =
+        map_source_bytes_to_scalars(analysis.bytes, sample_bits, mappers);
+    analysis.scalars.clear();
+    analysis.scalars.reserve(source_scalars.size());
+    for (const thrystr::app::Scalar scalar : source_scalars) {
+        analysis.scalars.push_back(static_cast<float>(scalar));
+    }
+    analysis.window =
+        thrystr::find_highest_entropy_window(analysis.mapped_bytes, analysis.mapped_bytes.size());
     analysis.window.offset = 0u;
-    analysis.window.length = analysis.bytes.size();
-    analysis.window_count = source_size >= analysis.window.length
-        ? source_size - analysis.window.length + 1u
-        : 0u;
-    analysis.max_delta_sample_index = analysis.window.delta_index;
+    analysis.window.length = analysis.scalars.size();
+    const std::size_t source_samples = source_size / sample_bytes;
+    analysis.window_count = source_samples >= analysis.window.length
+                                ? source_samples - analysis.window.length + 1u
+                                : 0u;
+    analysis.max_delta_sample_index = analysis.window.delta_index / sample_bytes;
     analysis.max_abs_scalar_delta = thrystr::max_abs_scalar_delta(analysis.scalars);
     analysis.x_scale = thrystr::compute_x_scale(analysis.scalars, max_slope);
     analysis.wave_scale = wave_scale;
-    analysis.sine = thrystr::fit_wave_phase(analysis.scalars,
-                                            false,
-                                            wave_scale,
-                                            wave_tolerance,
-                                            phase_steps,
-                                            max_phase_test_points);
-    analysis.cosine = thrystr::fit_wave_phase(analysis.scalars,
-                                              true,
-                                              wave_scale,
-                                              wave_tolerance,
-                                              phase_steps,
-                                              max_phase_test_points);
+    analysis.sine = thrystr::fit_wave_phase(analysis.scalars, false, wave_scale, wave_tolerance,
+                                            phase_steps, max_phase_test_points);
+    analysis.cosine = thrystr::fit_wave_phase(analysis.scalars, true, wave_scale, wave_tolerance,
+                                              phase_steps, max_phase_test_points);
     return analysis;
 }
 
@@ -2025,19 +2637,11 @@ void fit_wave_phases(AppState& state) {
         thrystr::Analysis& analysis = *state.analysis;
         analysis.wave_scale = static_cast<double>(state.wave_scale);
         analysis.sine = thrystr::fit_wave_phase(
-            analysis.scalars,
-            false,
-            analysis.wave_scale,
-            static_cast<double>(state.wave_tolerance),
-            state.phase_steps,
-            static_cast<std::size_t>(state.phase_test_points));
+            analysis.scalars, false, analysis.wave_scale, static_cast<double>(state.wave_tolerance),
+            state.phase_steps, static_cast<std::size_t>(state.phase_test_points));
         analysis.cosine = thrystr::fit_wave_phase(
-            analysis.scalars,
-            true,
-            analysis.wave_scale,
-            static_cast<double>(state.wave_tolerance),
-            state.phase_steps,
-            static_cast<std::size_t>(state.phase_test_points));
+            analysis.scalars, true, analysis.wave_scale, static_cast<double>(state.wave_tolerance),
+            state.phase_steps, static_cast<std::size_t>(state.phase_test_points));
         state.status = "Fitted wave phases";
     } catch (const std::exception& error) {
         state.status = error.what();
@@ -2048,15 +2652,12 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
     const std::filesystem::path output_path = with_wave_settings_extension(path);
     std::ofstream output(output_path, std::ios::binary);
     if (!output) {
-        throw std::runtime_error("could not open wave settings for write: " +
-                                 output_path.string());
+        throw std::runtime_error("could not open wave settings for write: " + output_path.string());
     }
 
     output.write(kWaveSettingsMagic.data(),
                  static_cast<std::streamsize>(kWaveSettingsMagic.size()));
-    const auto write_value = [&]<typename T>(const T& value) {
-        write_binary_le(output, value);
-    };
+    const auto write_value = [&]<typename T>(const T& value) { write_binary_le(output, value); };
     write_value(kWaveSettingsVersion);
     write_value(kWaveSettingsEndianStamp);
     write_value(state.max_slope);
@@ -2098,6 +2699,7 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
         write_value(static_cast<std::uint8_t>(entity.visible ? 1 : 0));
         write_string_le(output, entity.name);
         write_value(entity.data.spatial_period_nm);
+        write_value(entity.data.sample_bits);
         write_value(entity.wave.wavelength_nm);
         write_value(entity.wave.amplitude);
         write_value(entity.wave.amplitude_offset);
@@ -2146,10 +2748,10 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
         workspace_to_save = &fallback_workspace;
     }
 
-    const std::uint8_t track_count = workspace_to_save
-        ? static_cast<std::uint8_t>(
-              std::min(workspace_to_save->tracks.size(), thrystr::app::kMaxTracks))
-        : 0u;
+    const std::uint8_t track_count =
+        workspace_to_save ? static_cast<std::uint8_t>(std::min(workspace_to_save->tracks.size(),
+                                                               thrystr::app::kMaxTracks))
+                          : 0u;
     write_value(track_count);
     write_value(workspace_to_save ? workspace_to_save->parity_track_id
                                   : thrystr::app::kNoParityTrack);
@@ -2171,8 +2773,7 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
             } else {
                 write_value(static_cast<std::uint32_t>(0u));
             }
-            const auto track_section_count =
-                static_cast<std::uint32_t>(track.sections.size());
+            const auto track_section_count = static_cast<std::uint32_t>(track.sections.size());
             write_value(track_section_count);
             for (const thrystr::app::Section& section : track.sections) {
                 write_value(section.start_index);
@@ -2208,8 +2809,8 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
 
     const std::uint32_t version = read_binary_le<std::uint32_t>(input);
     const bool portable_payload = version >= 4;
-    if (version != 1 && version != 2 && version != 3 &&
-        version != 4 && version != kWaveSettingsVersion) {
+    if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 &&
+        version != kWaveSettingsVersion) {
         throw std::runtime_error("unsupported wave settings version");
     }
     if (portable_payload) {
@@ -2259,8 +2860,8 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     state.mappers.clear();
     state.mappers.reserve(mapper_count);
     for (std::uint32_t i = 0; i < mapper_count; ++i) {
-        const auto kind = static_cast<thrystr::ValueMapperKind>(
-            read_value.template operator()<std::uint32_t>());
+        const auto kind =
+            static_cast<thrystr::ValueMapperKind>(read_value.template operator()<std::uint32_t>());
         const double operand = read_value.template operator()<double>();
         const bool enabled = read_value.template operator()<std::uint8_t>() != 0;
         state.mappers.push_back({kind, operand, enabled});
@@ -2277,17 +2878,18 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         for (std::uint32_t i = 0; i < entity_count; ++i) {
             Entity entity;
             entity.id = read_value.template operator()<std::int32_t>();
-            entity.type = static_cast<EntityType>(
-                read_value.template operator()<std::uint32_t>());
+            entity.type = static_cast<EntityType>(read_value.template operator()<std::uint32_t>());
             entity.visible = read_value.template operator()<std::uint8_t>() != 0;
             entity.name = read_text();
             entity.data.spatial_period_nm = read_value.template operator()<double>();
+            entity.data.sample_bits =
+                version >= 6 ? normalize_sample_bits(read_value.template operator()<std::uint8_t>())
+                             : 8u;
             entity.wave.wavelength_nm = read_value.template operator()<double>();
             entity.wave.amplitude = read_value.template operator()<double>();
             entity.wave.amplitude_offset = read_value.template operator()<double>();
             entity.wave.phase_nm = read_value.template operator()<double>();
-            const std::uint32_t modifier_count =
-                read_value.template operator()<std::uint32_t>();
+            const std::uint32_t modifier_count = read_value.template operator()<std::uint32_t>();
             if (modifier_count > kMaxWaveSettingsItems) {
                 throw std::runtime_error("wave settings modifier count too large");
             }
@@ -2317,14 +2919,12 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
             copy_to_buffer(state.path, source_path);
         }
         if (version >= 3) {
-            const std::uint32_t section_count =
-                read_value.template operator()<std::uint32_t>();
+            const std::uint32_t section_count = read_value.template operator()<std::uint32_t>();
             if (section_count > kMaxWaveSettingsItems) {
                 throw std::runtime_error("wave settings section count too large");
             }
             state.fitted_sections.reserve(section_count);
-            for (std::uint32_t section_index = 0; section_index < section_count;
-                 ++section_index) {
+            for (std::uint32_t section_index = 0; section_index < section_count; ++section_index) {
                 thrystr::app::Section section;
                 section.start_index = read_value.template operator()<std::uint32_t>();
                 section.length = read_value.template operator()<std::uint32_t>();
@@ -2341,10 +2941,8 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         }
         if (version >= 5) {
             thrystr::app::WorkspaceModel workspace;
-            const std::uint8_t track_count =
-                read_value.template operator()<std::uint8_t>();
-            workspace.parity_track_id =
-                read_value.template operator()<std::uint8_t>();
+            const std::uint8_t track_count = read_value.template operator()<std::uint8_t>();
+            workspace.parity_track_id = read_value.template operator()<std::uint8_t>();
             if (track_count > thrystr::app::kMaxTracks) {
                 throw std::runtime_error("wave settings track count too large");
             }
@@ -2356,8 +2954,7 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
                     read_value.template operator()<std::uint8_t>());
                 track.visible = read_value.template operator()<std::uint8_t>() != 0u;
                 track.name = read_text();
-                const std::uint32_t mask_size =
-                    read_value.template operator()<std::uint32_t>();
+                const std::uint32_t mask_size = read_value.template operator()<std::uint32_t>();
                 if (mask_size > kMaxWaveSettingsMaskBytes) {
                     throw std::runtime_error("wave settings owned mask too large");
                 }
@@ -2375,8 +2972,7 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
                     throw std::runtime_error("wave settings track section count too large");
                 }
                 track.sections.reserve(track_section_count);
-                for (std::uint32_t section_index = 0;
-                     section_index < track_section_count;
+                for (std::uint32_t section_index = 0; section_index < track_section_count;
                      ++section_index) {
                     thrystr::app::Section section;
                     section.start_index = read_value.template operator()<std::uint32_t>();
@@ -2442,23 +3038,20 @@ void load_path(AppState& state) {
     try {
         ensure_workspace(state);
         state.status = "Loading";
+        Entity& data = ensure_data_entity(state);
+        data.data.sample_bits = normalize_sample_bits(data.data.sample_bits);
         const std::filesystem::path source_path(state.path);
         const bool phase_fit_deferred = should_defer_phase_fit_on_load(source_path);
         state.lazy_block_mib = std::clamp(state.lazy_block_mib, 1, 10);
         const std::size_t block_bytes = lazy_block_bytes(state);
         state.analysis = load_lazy_analysis_window(
-            source_path,
-            block_bytes,
-            state.max_slope,
-            static_cast<double>(state.wave_scale),
-            static_cast<double>(state.wave_tolerance),
-            state.phase_steps,
+            source_path, block_bytes, state.max_slope, static_cast<double>(state.wave_scale),
+            static_cast<double>(state.wave_tolerance), state.phase_steps,
             phase_fit_deferred ? 0u : static_cast<std::size_t>(state.phase_test_points),
-            state.mappers);
+            state.mappers, data.data.sample_bits);
         seed_lazy_cache_from_analysis(state);
 
         const auto& analysis = *state.analysis;
-        Entity& data = ensure_data_entity(state);
         data.name = analysis.source_path.filename().string();
         if (state.selected_entity_id == 0 || !find_entity(state, state.selected_entity_id)) {
             select_entity(state, data.id);
@@ -2477,9 +3070,10 @@ void load_path(AppState& state) {
         } else {
             clamp_segment(state);
         }
-        state.status = "Loaded " + analysis.source_path.filename().string() +
-                       " / lazy " + format_bytes(block_bytes) +
-                       " / source " + format_bytes(analysis.source_size);
+        state.status = "Loaded " + analysis.source_path.filename().string() + " / lazy " +
+                       format_bytes(block_bytes) + " / source " +
+                       format_bytes(analysis.source_size) + " / " +
+                       format_count(data.data.sample_bits) + "-bit points";
         if (phase_fit_deferred) {
             state.status += " / phase fit deferred";
         }
@@ -2564,10 +3158,9 @@ void request_file_dialog(AppState& state, DialogPurpose purpose) {
 
 bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = false) {
     const ImU32 text_color = accent
-        ? ImGui::GetColorU32(ImGui::GetStyle().Colors[ImGuiCol_CheckMark])
-        : skald::tokens::ink::primary;
-    ImGui::PushStyleColor(ImGuiCol_Text,
-                          skald::tokens::to_vec4(text_color));
+                                 ? ImGui::GetColorU32(ImGui::GetStyle().Colors[ImGuiCol_CheckMark])
+                                 : skald::tokens::ink::primary;
+    ImGui::PushStyleColor(ImGuiCol_Text, skald::tokens::to_vec4(text_color));
     const bool clicked = skald::IconButton(glyph, tooltip);
     ImGui::PopStyleColor();
     return clicked;
@@ -2576,64 +3169,43 @@ bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = f
 bool window_control_button(WindowControl control, const char* tooltip, GLFWwindow* window) {
     const float size = kWindowControlButtonSize;
     const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const char* id = control == WindowControl::Minimize
-        ? "##window_minimize"
-        : control == WindowControl::Maximize ? "##window_maximize" : "##window_close";
+    const char* id = control == WindowControl::Minimize   ? "##window_minimize"
+                     : control == WindowControl::Maximize ? "##window_maximize"
+                                                          : "##window_close";
     ImGui::InvisibleButton(id, ImVec2(size, size));
     const bool hovered = ImGui::IsItemHovered();
     const bool active = ImGui::IsItemActive();
     const bool clicked = ImGui::IsItemClicked();
     auto* draw = ImGui::GetWindowDrawList();
 
-    const ImU32 fill = control == WindowControl::Close && hovered
-        ? skald::tokens::with_alpha(skald::tokens::status::destructive, active ? 0.70f : 0.52f)
+    const ImU32 fill =
+        control == WindowControl::Close && hovered
+            ? skald::tokens::with_alpha(skald::tokens::status::destructive, active ? 0.70f : 0.52f)
         : hovered ? skald::tokens::surface::control
                   : kTransparent;
-    const ImU32 ink = hovered ? skald::tokens::ink::primary
-                              : skald::tokens::ink::muted;
-    draw->AddRectFilled(pos,
-                        ImVec2(pos.x + size, pos.y + size),
-                        fill,
-                        skald::tokens::radii::ctrl);
+    const ImU32 ink = hovered ? skald::tokens::ink::primary : skald::tokens::ink::muted;
+    draw->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), fill, skald::tokens::radii::ctrl);
 
     const ImVec2 center(pos.x + size * 0.5f, pos.y + size * 0.5f);
     if (control == WindowControl::Minimize) {
         draw->AddLine(ImVec2(center.x - 5.0f, center.y + 4.0f),
-                      ImVec2(center.x + 5.0f, center.y + 4.0f),
-                      ink,
-                      1.6f);
+                      ImVec2(center.x + 5.0f, center.y + 4.0f), ink, 1.6f);
     } else if (control == WindowControl::Maximize) {
         const bool maximized = window && glfwGetWindowAttrib(window, GLFW_MAXIMIZED);
         if (maximized) {
             draw->AddRect(ImVec2(center.x - 3.0f, center.y - 5.0f),
-                          ImVec2(center.x + 5.0f, center.y + 3.0f),
-                          ink,
-                          0.0f,
-                          0,
-                          1.4f);
+                          ImVec2(center.x + 5.0f, center.y + 3.0f), ink, 0.0f, 0, 1.4f);
             draw->AddRect(ImVec2(center.x - 6.0f, center.y - 2.0f),
-                          ImVec2(center.x + 2.0f, center.y + 6.0f),
-                          ink,
-                          0.0f,
-                          0,
-                          1.4f);
+                          ImVec2(center.x + 2.0f, center.y + 6.0f), ink, 0.0f, 0, 1.4f);
         } else {
             draw->AddRect(ImVec2(center.x - 5.0f, center.y - 5.0f),
-                          ImVec2(center.x + 5.0f, center.y + 5.0f),
-                          ink,
-                          0.0f,
-                          0,
-                          1.5f);
+                          ImVec2(center.x + 5.0f, center.y + 5.0f), ink, 0.0f, 0, 1.5f);
         }
     } else {
         draw->AddLine(ImVec2(center.x - 5.0f, center.y - 5.0f),
-                      ImVec2(center.x + 5.0f, center.y + 5.0f),
-                      ink,
-                      1.6f);
+                      ImVec2(center.x + 5.0f, center.y + 5.0f), ink, 1.6f);
         draw->AddLine(ImVec2(center.x + 5.0f, center.y - 5.0f),
-                      ImVec2(center.x - 5.0f, center.y + 5.0f),
-                      ink,
-                      1.6f);
+                      ImVec2(center.x - 5.0f, center.y + 5.0f), ink, 1.6f);
     }
 
     if (hovered && tooltip && tooltip[0] != '\0') {
@@ -2646,10 +3218,8 @@ float window_control_group_width(int button_count) {
     if (button_count <= 0) {
         return kWindowControlRightMargin;
     }
-    const float gaps =
-        static_cast<float>(button_count - 1) * ImGui::GetStyle().ItemSpacing.x;
-    return static_cast<float>(button_count) * kWindowControlButtonSize +
-           gaps +
+    const float gaps = static_cast<float>(button_count - 1) * ImGui::GetStyle().ItemSpacing.x;
+    return static_cast<float>(button_count) * kWindowControlButtonSize + gaps +
            kWindowControlRightMargin;
 }
 
@@ -2660,24 +3230,19 @@ ImVec2 begin_titlebar_chrome(const char* id) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, skald::tokens::pad::window);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::none);
     ImGui::Begin(id, nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus |
-                 ImGuiWindowFlags_NoNavFocus);
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoNavFocus);
     ImGui::PopStyleVar(2);
     return viewport;
 }
 
 void draw_titlebar_background(const ImVec2& viewport) {
     auto* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(ImVec2(0.0f, 0.0f),
-                        ImVec2(viewport.x, kTopChromeHeight),
+    draw->AddRectFilled(ImVec2(0.0f, 0.0f), ImVec2(viewport.x, kTopChromeHeight),
                         skald::tokens::surface::deep);
     draw->AddLine(ImVec2(0.0f, kTopChromeHeight - 1.0f),
-                  ImVec2(viewport.x, kTopChromeHeight - 1.0f),
-                  skald::tokens::border::separator,
+                  ImVec2(viewport.x, kTopChromeHeight - 1.0f), skald::tokens::border::separator,
                   1.0f);
 }
 
@@ -2691,9 +3256,7 @@ void draw_titlebar_wordmark(AppState& state, const char* tagline) {
         ImGui::PopFont();
     }
     ImGui::SameLine(72.0f);
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
-                       "%s",
-                       tagline);
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s", tagline);
 }
 
 void draw_titlebar(AppState& state, GLFWwindow* window) {
@@ -2772,9 +3335,10 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     }
 
     ImGui::SameLine();
-    const std::string source_name = state.path[0] == '\0'
-        ? std::string("source: none")
-        : std::string("source: ") + std::filesystem::path(state.path).filename().string();
+    const std::string source_name =
+        state.path[0] == '\0'
+            ? std::string("source: none")
+            : std::string("source: ") + std::filesystem::path(state.path).filename().string();
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
                        source_name.c_str());
 
@@ -2803,11 +3367,8 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     ImGui::End();
 }
 
-bool value_bar_double(const char* label,
-                      double* value,
-                      double step_per_pixel,
-                      const char* format = "%.4f",
-                      ImFont* mono_font = nullptr) {
+bool value_bar_double(const char* label, double* value, double step_per_pixel,
+                      const char* format = "%.4f", ImFont* mono_font = nullptr) {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);
     const float width = std::max(80.0f, ImGui::GetContentRegionAvail().x);
@@ -2826,22 +3387,22 @@ bool value_bar_double(const char* label,
     }
 
     auto* draw = ImGui::GetWindowDrawList();
-    const ImU32 fill = active
-        ? skald::tokens::surface::control_hi
-        : hovered ? skald::tokens::surface::control : skald::tokens::surface::panel_alt;
-    draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                        fill, skald::tokens::radii::ctrl);
-    draw->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                  skald::tokens::border::default_, skald::tokens::radii::ctrl);
+    const ImU32 fill = active    ? skald::tokens::surface::control_hi
+                       : hovered ? skald::tokens::surface::control
+                                 : skald::tokens::surface::panel_alt;
+    draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), fill,
+                        skald::tokens::radii::ctrl);
+    draw->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), skald::tokens::border::default_,
+                  skald::tokens::radii::ctrl);
     char text[128] = {};
     std::snprintf(text, sizeof(text), format, *value);
     if (mono_font) {
         ImGui::PushFont(mono_font);
     }
     const ImVec2 text_size = ImGui::CalcTextSize(text);
-    draw->AddText(ImVec2(pos.x + size.x - text_size.x - 10.0f,
-                         pos.y + (size.y - text_size.y) * 0.5f),
-                  skald::tokens::ink::primary, text);
+    draw->AddText(
+        ImVec2(pos.x + size.x - text_size.x - 10.0f, pos.y + (size.y - text_size.y) * 0.5f),
+        skald::tokens::ink::primary, text);
     if (mono_font) {
         ImGui::PopFont();
     }
@@ -2852,9 +3413,7 @@ bool value_bar_double(const char* label,
     return changed;
 }
 
-bool value_bar_int(const char* label,
-                   int* value,
-                   double step_per_pixel,
+bool value_bar_int(const char* label, int* value, double step_per_pixel,
                    ImFont* mono_font = nullptr) {
     double editable = static_cast<double>(*value);
     const bool changed = value_bar_double(label, &editable, step_per_pixel, "%.0f", mono_font);
@@ -2873,9 +3432,8 @@ void draw_value_mapper_stack(AppState& state) {
     int move_to = -1;
 
     if (ImGui::BeginTable("##mapper_table", 4,
-                          ImGuiTableFlags_BordersInnerH |
-                          ImGuiTableFlags_RowBg |
-                          ImGuiTableFlags_SizingStretchProp)) {
+                          ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 46.0f);
         ImGui::TableSetupColumn("Op", ImGuiTableColumnFlags_WidthFixed, 92.0f);
         ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
@@ -2917,13 +3475,8 @@ void draw_value_mapper_stack(AppState& state) {
 
             ImGui::TableSetColumnIndex(2);
             ImGui::SetNextItemWidth(-FLT_MIN);
-            mapper_changed |= ImGui::DragScalar("##operand",
-                                                ImGuiDataType_Double,
-                                                &mapper.operand,
-                                                0.1f,
-                                                nullptr,
-                                                nullptr,
-                                                "%.6f");
+            mapper_changed |= ImGui::DragScalar("##operand", ImGuiDataType_Double, &mapper.operand,
+                                                0.1f, nullptr, nullptr, "%.6f");
 
             ImGui::TableSetColumnIndex(3);
             if (skald::IconButton(skald::icons::kChevronRight, "Move up", 22.0f) && i > 0) {
@@ -2990,8 +3543,7 @@ void draw_inspector_overlay(AppState& state) {
     ImGui::SetNextWindowPos(ImVec2(18.0f, kTopChromeHeight + 18.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(340.0f, 360.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("##inspector_overlay", &state.show_inspector_overlay,
-                      ImGuiWindowFlags_NoTitleBar |
-                      ImGuiWindowFlags_NoCollapse)) {
+                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
     }
@@ -3006,7 +3558,7 @@ void draw_inspector_overlay(AppState& state) {
         skald::KvRow("source", "%s", format_bytes(a.source_size).c_str());
         skald::KvRow("windows", "%s", format_count(a.window_count).c_str());
         skald::KvRow("offset", "%s", format_count(a.window.offset).c_str());
-        skald::KvRow("length", "%s", format_bytes(a.window.length).c_str());
+        skald::KvRow("window samples", "%s", format_count(a.window.length).c_str());
         skald::KvRow("max delta", "%u", static_cast<unsigned>(a.window.max_delta));
         skald::KvRow("x scale", "%.3f", static_cast<double>(a.x_scale));
         skald::KvRow("points", "%s", format_count(source_sample_count(state)).c_str());
@@ -3040,8 +3592,7 @@ void draw_settings_dialog(AppState& state) {
 
     bool open = state.show_settings;
     ImGui::SetNextWindowSize(kSettingsDialogSize, ImGuiCond_Appearing);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,
-                          skald::tokens::to_vec4(skald::tokens::surface::panel));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, skald::tokens::to_vec4(skald::tokens::surface::panel));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, skald::tokens::pad::window);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::modal);
     if (ImGui::BeginPopupModal("Settings", &open, ImGuiWindowFlags_NoCollapse)) {
@@ -3083,33 +3634,37 @@ void draw_fit_validation_overlay(AppState& state) {
     }
 
     ImGui::SetNextWindowSize(ImVec2(680.0f, 420.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Fit Validation",
-                      &state.show_fit_validation,
-                      ImGuiWindowFlags_NoCollapse)) {
+    if (!ImGui::Begin("Fit Validation", &state.show_fit_validation, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
     }
 
     const thrystr::app::ValidationReport& report = state.fit_validation;
-    skald::KvRowStatus("coverage",
-                       report.pass ? "PASS" : "FAIL",
-                       report.pass ? skald::BadgeTone::Success
-                                   : skald::BadgeTone::Destructive);
+    skald::KvRowStatus("coverage", report.pass ? "PASS" : "FAIL",
+                       report.pass ? skald::BadgeTone::Success : skald::BadgeTone::Destructive);
     skald::KvRow("sections", "%s", format_count(state.fitted_sections.size()).c_str());
     if (state.fitted_workspace_valid) {
         skald::KvRow("tracks", "%s%s",
-                     format_count(state.fitted_workspace.tracks.size()).c_str(),
+                     format_count(data_track_count(state.fitted_workspace)).c_str(),
                      state.fitted_workspace_used_parity ? " + parity" : "");
     }
     skald::KvRow("samples", "%s", format_count(report.checked_samples).c_str());
     skald::KvRow("max residual", "%.8f", report.max_residual);
     skald::KvRow("mean residual", "%.8f", report.mean_residual);
+    const EncodingEstimate encoding = estimate_encoded_output_size(state);
+    if (encoding.encoded_bytes > 0u) {
+        skald::KvRow("encoded size", "%s", format_bytes(encoding.encoded_bytes).c_str());
+        skald::KvRow("source ratio", "%s %s", format_percent(encoding.source_ratio).c_str(),
+                     encoding_target_label(encoding.source_ratio));
+        skald::KvRow("covered ratio", "%s", format_percent(encoding.covered_ratio).c_str());
+        skald::KvRow("curve points", "%s", format_count(encoding.curve_points).c_str());
+        skald::KvRow("data sections", "%s", format_count(encoding.data_sections).c_str());
+        skald::KvRow("parity sections", "%s", format_count(encoding.parity_sections).c_str());
+    }
 
     if (ImGui::BeginTable("##fit_validation_sections", 6,
-                          ImGuiTableFlags_BordersInnerH |
-                          ImGuiTableFlags_RowBg |
-                          ImGuiTableFlags_SizingStretchProp |
-                          ImGuiTableFlags_ScrollY,
+                          ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
                           ImVec2(0.0f, 190.0f))) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 44.0f);
         ImGui::TableSetupColumn("start", ImGuiTableColumnFlags_WidthFixed, 88.0f);
@@ -3132,12 +3687,10 @@ void draw_fit_validation_overlay(AppState& state) {
             ImGui::TableSetColumnIndex(4);
             ImGui::Text("%.4f", section.wave_wavelength_nm);
             ImGui::TableSetColumnIndex(5);
-            ImGui::TextColored(
-                skald::tokens::to_vec4(section.max_residual > section.fit_tolerance
-                                            ? skald::tokens::status::destructive
-                                            : skald::tokens::ink::primary),
-                "%.8f",
-                section.max_residual);
+            ImGui::TextColored(skald::tokens::to_vec4(section.max_residual > section.fit_tolerance
+                                                          ? skald::tokens::status::destructive
+                                                          : skald::tokens::ink::primary),
+                               "%.8f", section.max_residual);
         }
         ImGui::EndTable();
     }
@@ -3146,9 +3699,7 @@ void draw_fit_validation_overlay(AppState& state) {
         skald::SectionHeader("Issues");
         if (ImGui::BeginChild("##fit_validation_issues", ImVec2(0.0f, 100.0f), false)) {
             for (const thrystr::app::ValidationIssue& issue : report.issues) {
-                ImGui::TextWrapped("%s @ sample %zu",
-                                   issue.message.c_str(),
-                                   issue.sample_index);
+                ImGui::TextWrapped("%s @ sample %zu", issue.message.c_str(), issue.sample_index);
             }
         }
         ImGui::EndChild();
@@ -3168,25 +3719,20 @@ StartupAction draw_splash(AppState& state) {
     ImGui::SetNextWindowPos(ImVec2(0.0f, body_top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(body_size, ImGuiCond_Always);
     ImGui::Begin("##splash_host", nullptr,
-                 ImGuiWindowFlags_NoDecoration |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoSavedSettings |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoScrollWithMouse);
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoScrollWithMouse);
 
     const std::array<skald::SplashAction, 3> actions = {{
         {"New workspace", "Ctrl+N"},
         {"Open workspace", ""},
         {"Load source", ""},
     }};
-    const skald::SplashChoice splash_choice = skald::Splash(
-        "thrystr",
-        "Scalar wave workspace",
-        {},
-        std::span<const skald::SplashAction>(actions.data(), actions.size()),
-        static_cast<ImTextureID>(state.splash_hero_texture),
-        state.splash_hero_size,
-        state.fonts.hero);
+    const skald::SplashChoice splash_choice =
+        skald::Splash("thrystr", "Scalar wave workspace", {},
+                      std::span<const skald::SplashAction>(actions.data(), actions.size()),
+                      static_cast<ImTextureID>(state.splash_hero_texture), state.splash_hero_size,
+                      state.fonts.hero);
 
     ImGui::End();
 
@@ -3218,8 +3764,7 @@ void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
     ImGui::End();
 }
 
-StartupAction draw_splash_window(AppState& state,
-                                 GLFWwindow* window,
+StartupAction draw_splash_window(AppState& state, GLFWwindow* window,
                                  const ChromeCursors& cursors) {
     StartupAction choice = draw_splash(state);
     draw_splash_titlebar(state, window);
@@ -3233,15 +3778,12 @@ void draw_entity_toolbox(AppState& state) {
     }
 
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(std::max(0.0f, viewport.x - kToolboxWidth),
-                                   kTopChromeHeight));
+    ImGui::SetNextWindowPos(ImVec2(std::max(0.0f, viewport.x - kToolboxWidth), kTopChromeHeight));
     ImGui::SetNextWindowSize(ImVec2(std::min(kToolboxWidth, viewport.x),
                                     std::max(120.0f, viewport.y - kTopChromeHeight)));
     ImGui::Begin("##toolbox", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoCollapse);
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoCollapse);
 
     skald::SectionHeader("Toolbox");
     skald::SectionHeader("Entities");
@@ -3276,18 +3818,40 @@ void draw_entity_toolbox(AppState& state) {
         if (state.analysis) {
             const thrystr::Analysis& a = *state.analysis;
             skald::KvRow("points", "%s", format_count(source_sample_count(state)).c_str());
-            skald::KvRow("loaded blocks", "%s",
-                         format_count(state.lazy_blocks.size()).c_str());
+            skald::KvRow("loaded blocks", "%s", format_count(state.lazy_blocks.size()).c_str());
             skald::KvRow("block size", "%s", format_bytes(lazy_block_bytes(state)).c_str());
             skald::KvRow("source", "%s", format_bytes(a.source_size).c_str());
         } else {
             skald::KvRowStatus("source", "none", skald::BadgeTone::Muted);
         }
-        if (data &&
-            value_bar_double("point spacing nm", &data->data.spatial_period_nm,
-                             0.01, "%.6f", state.fonts.mono)) {
-            data->data.spatial_period_nm =
-                std::max(0.000001, data->data.spatial_period_nm);
+        if (data && value_bar_double("point spacing nm", &data->data.spatial_period_nm, 0.01,
+                                     "%.6f", state.fonts.mono)) {
+            data->data.spatial_period_nm = std::max(0.000001, data->data.spatial_period_nm);
+        }
+        if (data) {
+            data->data.sample_bits = normalize_sample_bits(data->data.sample_bits);
+            skald::KvRow("point width", "%u-bit", static_cast<unsigned>(data->data.sample_bits));
+            bool sample_width_changed = false;
+            for (const std::uint8_t bits :
+                 {std::uint8_t{8}, std::uint8_t{16}, std::uint8_t{32}, std::uint8_t{64}}) {
+                if (bits != 8u) {
+                    ImGui::SameLine();
+                }
+                const std::string label = format_count(bits);
+                if (playback_speed_button(label.c_str(), data->data.sample_bits == bits, 42.0f)) {
+                    data->data.sample_bits = bits;
+                    sample_width_changed = true;
+                }
+            }
+            if (sample_width_changed) {
+                state.fitted_sections.clear();
+                state.fitted_workspace = {};
+                state.fitted_workspace_valid = false;
+                state.fitted_workspace_used_parity = false;
+                state.fit_validation = {};
+                clear_lazy_cache(state);
+                reload_if_file_selected(state);
+            }
         }
 
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -3303,37 +3867,23 @@ void draw_entity_toolbox(AppState& state) {
                 double start_index = static_cast<double>(state.segment.selection_start);
                 double end_index = static_cast<double>(state.segment.selection_end);
                 bool changed = false;
-                changed |= value_bar_double("start index",
-                                            &start_index,
-                                            0.25,
-                                            "%.0f",
-                                            state.fonts.mono);
-                changed |= value_bar_double("end index",
-                                            &end_index,
-                                            0.25,
-                                            "%.0f",
-                                            state.fonts.mono);
+                changed |=
+                    value_bar_double("start index", &start_index, 0.25, "%.0f", state.fonts.mono);
+                changed |=
+                    value_bar_double("end index", &end_index, 0.25, "%.0f", state.fonts.mono);
                 if (changed) {
                     const std::size_t count = source_sample_count(state);
                     state.segment.selection_start = clamp_index(start_index, count);
                     state.segment.selection_end = clamp_index(end_index, count);
                     clamp_segment(state);
                 }
-                double start_nm =
-                    static_cast<double>(state.segment.selection_start) * period;
-                double end_nm =
-                    static_cast<double>(state.segment.selection_end) * period;
+                double start_nm = static_cast<double>(state.segment.selection_start) * period;
+                double end_nm = static_cast<double>(state.segment.selection_end) * period;
                 bool nm_changed = false;
-                nm_changed |= value_bar_double("start nm",
-                                               &start_nm,
-                                               period * 0.25,
-                                               "%.3f",
+                nm_changed |= value_bar_double("start nm", &start_nm, period * 0.25, "%.3f",
                                                state.fonts.mono);
-                nm_changed |= value_bar_double("end nm",
-                                               &end_nm,
-                                               period * 0.25,
-                                               "%.3f",
-                                               state.fonts.mono);
+                nm_changed |=
+                    value_bar_double("end nm", &end_nm, period * 0.25, "%.3f", state.fonts.mono);
                 if (nm_changed) {
                     const std::size_t count = source_sample_count(state);
                     state.segment.selection_start = clamp_index(start_nm / period, count);
@@ -3341,8 +3891,7 @@ void draw_entity_toolbox(AppState& state) {
                     clamp_segment(state);
                 }
                 const auto [first, last] = normalized_selection(state);
-                skald::KvRow("span", "%.3f nm",
-                             static_cast<double>(last - first) * period);
+                skald::KvRow("span", "%.3f nm", static_cast<double>(last - first) * period);
                 if (skald::GhostButton("Select All", ImVec2(104.0f, 0.0f))) {
                     create_section(state);
                 }
@@ -3352,6 +3901,27 @@ void draw_entity_toolbox(AppState& state) {
                         cancel_auto_fit(state);
                     }
                     skald::KvRowStatus("auto-fit", "running", skald::BadgeTone::Info);
+                    std::size_t completed_segments = 0u;
+                    std::size_t total_segments = 0u;
+                    std::size_t processed_samples = 0u;
+                    std::size_t total_samples = 0u;
+                    {
+                        std::scoped_lock lock(state.auto_fit_job.result_mutex);
+                        completed_segments = state.auto_fit_job.completed_segments;
+                        total_segments = state.auto_fit_job.total_segments;
+                        processed_samples = state.auto_fit_job.processed_samples;
+                        total_samples = state.auto_fit_job.total_samples;
+                    }
+                    if (total_segments > 0u) {
+                        const std::string segment_text =
+                            format_count(completed_segments) + "/" + format_count(total_segments);
+                        skald::KvRow("segments", "%s", segment_text.c_str());
+                    }
+                    if (total_samples > 0u) {
+                        const std::string sample_text =
+                            format_count(processed_samples) + "/" + format_count(total_samples);
+                        skald::KvRow("samples", "%s", sample_text.c_str());
+                    }
                 } else if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
                     auto_fit_current_range(state);
                 }
@@ -3361,17 +3931,28 @@ void draw_entity_toolbox(AppState& state) {
                     auto_fit_current_range(state, true);
                 }
                 if (!state.fitted_sections.empty()) {
+                    const EncodingEstimate encoding = estimate_encoded_output_size(state);
                     skald::KvRow("fit sections", "%s",
                                  format_count(state.fitted_sections.size()).c_str());
                     if (state.fitted_workspace_valid) {
                         skald::KvRow("fit tracks", "%s%s",
-                                     format_count(state.fitted_workspace.tracks.size()).c_str(),
+                                     format_count(encoding.data_tracks).c_str(),
                                      state.fitted_workspace_used_parity ? " + parity" : "");
                     }
                     skald::KvRow("fit samples", "%s",
                                  format_count(state.fit_validation.checked_samples).c_str());
-                    skald::KvRow("fit residual", "%.6f",
-                                 state.fit_validation.max_residual);
+                    skald::KvRow("fit residual", "%.6f", state.fit_validation.max_residual);
+                    if (encoding.encoded_bytes > 0u) {
+                        skald::KvRow("encoded size", "%s",
+                                     format_bytes(encoding.encoded_bytes).c_str());
+                        skald::KvRow("source ratio", "%s %s",
+                                     format_percent(encoding.source_ratio).c_str(),
+                                     encoding_target_label(encoding.source_ratio));
+                        skald::KvRow("curve points", "%s",
+                                     format_count(encoding.curve_points).c_str());
+                        skald::KvRow("parity sections", "%s",
+                                     format_count(encoding.parity_sections).c_str());
+                    }
                     if (skald::GhostButton("Validate Fit", ImVec2(118.0f, 0.0f))) {
                         state.fit_validation = validate_fitted_sections(state);
                         state.show_fit_validation = true;
@@ -3409,25 +3990,15 @@ void draw_entity_toolbox(AppState& state) {
         bool lazy_block_changed = false;
         double max_slope = static_cast<double>(state.max_slope);
         double wave_tolerance = static_cast<double>(state.wave_tolerance);
-        params_changed |= value_bar_double("max slope",
-                                           &max_slope,
-                                           0.001,
-                                           "%.4f",
-                                           state.fonts.mono);
-        params_changed |= value_bar_double("wave tolerance",
-                                           &wave_tolerance,
-                                           0.0001,
-                                           "%.5f",
-                                           state.fonts.mono);
+        params_changed |=
+            value_bar_double("max slope", &max_slope, 0.001, "%.4f", state.fonts.mono);
+        params_changed |=
+            value_bar_double("wave tolerance", &wave_tolerance, 0.0001, "%.5f", state.fonts.mono);
         params_changed |= value_bar_int("phase steps", &state.phase_steps, 4.0, state.fonts.mono);
-        params_changed |= value_bar_int("phase samples",
-                                        &state.phase_test_points,
-                                        512.0,
-                                        state.fonts.mono);
-        lazy_block_changed |= value_bar_int("lazy block MiB",
-                                            &state.lazy_block_mib,
-                                            0.05,
-                                            state.fonts.mono);
+        params_changed |=
+            value_bar_int("phase samples", &state.phase_test_points, 512.0, state.fonts.mono);
+        lazy_block_changed |=
+            value_bar_int("lazy block MiB", &state.lazy_block_mib, 0.05, state.fonts.mono);
         state.max_slope = static_cast<float>(max_slope);
         state.wave_tolerance = static_cast<float>(wave_tolerance);
         if (lazy_block_changed) {
@@ -3446,16 +4017,10 @@ void draw_entity_toolbox(AppState& state) {
     } else {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         skald::SectionHeader("Wave");
-        value_bar_double("wave spatial distance nm",
-                         &selected->wave.wavelength_nm,
-                         0.10,
-                         "%.4f",
+        value_bar_double("wave spatial distance nm", &selected->wave.wavelength_nm, 0.10, "%.4f",
                          state.fonts.mono);
         value_bar_double("amplitude", &selected->wave.amplitude, 0.01, "%.4f", state.fonts.mono);
-        value_bar_double("amplitude offset",
-                         &selected->wave.amplitude_offset,
-                         0.01,
-                         "%.4f",
+        value_bar_double("amplitude offset", &selected->wave.amplitude_offset, 0.01, "%.4f",
                          state.fonts.mono);
         value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f", state.fonts.mono);
         skald::KvRow("modifiers", "%s",
@@ -3466,10 +4031,8 @@ void draw_entity_toolbox(AppState& state) {
             selected->wave.phase_nm = fit.phase_nm;
             rebuild_wavelength_modifiers(state, selected->wave);
             const auto [first, last] = analysis_selection_bounds(state);
-            const WaveFitResult final_fit =
-                score_wave_on_range(state, selected->wave, first, last);
-            state.status = "Fitted " + selected->name + ": " +
-                           format_count(final_fit.hits) + "/" +
+            const WaveFitResult final_fit = score_wave_on_range(state, selected->wave, first, last);
+            state.status = "Fitted " + selected->name + ": " + format_count(final_fit.hits) + "/" +
                            format_count(final_fit.tested) + " point hits, " +
                            format_count(selected->wave.wavelength_modifiers.size()) +
                            " wavelength keys";
@@ -3496,16 +4059,9 @@ float plot_x_step(const AppState& state) {
     return std::max(0.05f, point_spacing * slope_scale * zoom);
 }
 
-void draw_data_point_markers(ImDrawList* draw,
-                             const AppState& state,
-                             std::size_t first,
-                             std::size_t last,
-                             float plot_left,
-                             float plot_top,
-                             float plot_bottom,
-                             float x_step,
-                             float y_zoom,
-                             const ImVec2& clip_min,
+void draw_data_point_markers(ImDrawList* draw, const AppState& state, std::size_t first,
+                             std::size_t last, float plot_left, float plot_top, float plot_bottom,
+                             float x_step, float y_zoom, const ImVec2& clip_min,
                              const ImVec2& clip_max) {
     const std::size_t count = source_sample_count(state);
     if (!draw || count == 0u || last < first) {
@@ -3514,12 +4070,13 @@ void draw_data_point_markers(ImDrawList* draw,
 
     if (x_step >= 3.0f) {
         for (std::size_t i = first; i <= last && i < count; ++i) {
-            const std::optional<float> scalar = scalar_at(state, i);
+            const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, i);
             if (!scalar) {
                 continue;
             }
-            const ImVec2 point(plot_left + static_cast<float>(i) * x_step,
-                               y_for_value(*scalar, plot_top, plot_bottom, y_zoom));
+            const ImVec2 point(
+                plot_left + static_cast<float>(i) * x_step,
+                y_for_value(static_cast<float>(*scalar), plot_top, plot_bottom, y_zoom));
             draw->AddCircleFilled(point, 2.2f, kDataPointHi);
         }
         return;
@@ -3531,7 +4088,7 @@ void draw_data_point_markers(ImDrawList* draw,
     std::vector<float> max_y(static_cast<std::size_t>(column_count), -FLT_MAX);
 
     for (std::size_t i = first; i <= last && i < count; ++i) {
-        const std::optional<float> scalar = scalar_at(state, i);
+        const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, i);
         if (!scalar) {
             continue;
         }
@@ -3539,10 +4096,9 @@ void draw_data_point_markers(ImDrawList* draw,
         if (x < clip_min.x || x > clip_max.x) {
             continue;
         }
-        const int column = std::clamp(static_cast<int>(std::floor(x - clip_min.x)),
-                                      0,
-                                      column_count - 1);
-        const float y = y_for_value(*scalar, plot_top, plot_bottom, y_zoom);
+        const int column =
+            std::clamp(static_cast<int>(std::floor(x - clip_min.x)), 0, column_count - 1);
+        const float y = y_for_value(static_cast<float>(*scalar), plot_top, plot_bottom, y_zoom);
         min_y[static_cast<std::size_t>(column)] =
             std::min(min_y[static_cast<std::size_t>(column)], y);
         max_y[static_cast<std::size_t>(column)] =
@@ -3557,13 +4113,9 @@ void draw_data_point_markers(ImDrawList* draw,
         const float x = clip_min.x + static_cast<float>(column) + 0.5f;
         if (std::abs(max_y[index] - min_y[index]) < 1.0f) {
             draw->AddRectFilled(ImVec2(x - 0.5f, min_y[index] - 0.5f),
-                                ImVec2(x + 0.5f, min_y[index] + 0.5f),
-                                kDataPointMed);
+                                ImVec2(x + 0.5f, min_y[index] + 0.5f), kDataPointMed);
         } else {
-            draw->AddLine(ImVec2(x, min_y[index]),
-                          ImVec2(x, max_y[index]),
-                          kDataPointLo,
-                          1.0f);
+            draw->AddLine(ImVec2(x, min_y[index]), ImVec2(x, max_y[index]), kDataPointLo, 1.0f);
         }
     }
 }
@@ -3589,18 +4141,15 @@ void move_playhead_by(AppState& state, int delta) {
     }
     if (delta < 0) {
         const std::size_t amount = static_cast<std::size_t>(-delta);
-        set_playhead_index(state,
-                           amount > state.playhead_index ? 0u : state.playhead_index - amount,
-                           true);
+        set_playhead_index(
+            state, amount > state.playhead_index ? 0u : state.playhead_index - amount, true);
         return;
     }
     const std::size_t amount = static_cast<std::size_t>(delta);
     const std::size_t max_index = count - 1u;
     const std::size_t clamped_playhead = std::min(state.playhead_index, max_index);
     const std::size_t remaining = max_index - clamped_playhead;
-    set_playhead_index(state,
-                       amount >= remaining ? max_index : clamped_playhead + amount,
-                       true);
+    set_playhead_index(state, amount >= remaining ? max_index : clamped_playhead + amount, true);
 }
 
 void toggle_xline_playback(AppState& state) {
@@ -3616,24 +4165,18 @@ void apply_custom_playback_speed(AppState& state) {
     errno = 0;
     char* end = nullptr;
     const double value = std::strtod(state.custom_playback_speed_text, &end);
-    while (end && *end != '\0' &&
-           std::isspace(static_cast<unsigned char>(*end)) != 0) {
+    while (end && *end != '\0' && std::isspace(static_cast<unsigned char>(*end)) != 0) {
         ++end;
     }
-    if (end != state.custom_playback_speed_text &&
-        end != nullptr &&
-        *end == '\0' &&
-        errno != ERANGE &&
-        std::isfinite(value) &&
-        value > 0.0) {
+    if (end != state.custom_playback_speed_text && end != nullptr && *end == '\0' &&
+        errno != ERANGE && std::isfinite(value) && value > 0.0) {
         state.playback_points_per_second = value;
     }
 }
 
-bool playback_speed_button(const char* label, bool selected, float width = 42.0f) {
+bool playback_speed_button(const char* label, bool selected, float width) {
     if (selected) {
-        ImGui::PushStyleColor(ImGuiCol_Button,
-                              skald::tokens::to_vec4(skald::tokens::status::info));
+        ImGui::PushStyleColor(ImGuiCol_Button, skald::tokens::to_vec4(skald::tokens::status::info));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                               skald::tokens::to_vec4(skald::tokens::status::info));
         ImGui::PushStyleColor(ImGuiCol_Text,
@@ -3643,8 +4186,7 @@ bool playback_speed_button(const char* label, bool selected, float width = 42.0f
                               skald::tokens::to_vec4(skald::tokens::surface::control));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                               skald::tokens::to_vec4(skald::tokens::surface::control_hi));
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              skald::tokens::to_vec4(skald::tokens::ink::primary));
+        ImGui::PushStyleColor(ImGuiCol_Text, skald::tokens::to_vec4(skald::tokens::ink::primary));
     }
     ImGui::PushID(label);
     const bool clicked = ImGui::Button(label, ImVec2(width, 0.0f));
@@ -3659,9 +4201,8 @@ void draw_playback_speed_controls(AppState& state) {
         ImGui::SameLine();
         char label[16] = {};
         std::snprintf(label, sizeof(label), "%.0f", preset);
-        const bool selected =
-            !state.custom_playback_speed &&
-            std::abs(state.playback_points_per_second - preset) < 0.001;
+        const bool selected = !state.custom_playback_speed &&
+                              std::abs(state.playback_points_per_second - preset) < 0.001;
         if (playback_speed_button(label, selected)) {
             state.custom_playback_speed = false;
             state.playback_points_per_second = preset;
@@ -3673,8 +4214,7 @@ void draw_playback_speed_controls(AppState& state) {
     if (playback_speed_button("custom", state.custom_playback_speed, 74.0f)) {
         if (!state.custom_playback_speed) {
             std::snprintf(state.custom_playback_speed_text,
-                          sizeof(state.custom_playback_speed_text),
-                          "%.3g",
+                          sizeof(state.custom_playback_speed_text), "%.3g",
                           state.playback_points_per_second);
         }
         state.custom_playback_speed = true;
@@ -3688,8 +4228,7 @@ void draw_playback_speed_controls(AppState& state) {
     if (state.custom_playback_speed) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(78.0f);
-        if (ImGui::InputText("##custom_playback_pps",
-                             state.custom_playback_speed_text,
+        if (ImGui::InputText("##custom_playback_pps", state.custom_playback_speed_text,
                              sizeof(state.custom_playback_speed_text))) {
             apply_custom_playback_speed(state);
             state.playhead_fraction = 0.0;
@@ -3717,111 +4256,285 @@ void update_xline_playback(AppState& state) {
     }
 }
 
-std::optional<std::uint8_t> ticker_byte_at(const AppState& state, std::size_t index) {
-    if (const std::optional<std::uint8_t> byte = raw_byte_at(state, index)) {
-        return byte;
+std::optional<std::uint64_t> ticker_sample_at(const AppState& state, std::size_t index) {
+    if (const std::optional<std::uint64_t> sample = raw_sample_at(state, index)) {
+        return sample;
     }
-    if (const std::optional<float> scalar = scalar_at(state, index)) {
-        return byte_from_scalar(*scalar);
+    if (const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, index)) {
+        return sample_from_scalar(*scalar, data_sample_bits(state));
     }
     return std::nullopt;
 }
 
-void draw_data_ticker(const AppState& state,
-                      ImDrawList* draw,
-                      std::size_t first,
-                      std::size_t last,
-                      float plot_left,
-                      float plot_bottom,
-                      float x_step,
-                      const ImVec2& clip_min,
+const thrystr::app::Section* section_for_index(std::span<const thrystr::app::Section> sections,
+                                               std::size_t index) {
+    for (const thrystr::app::Section& section : sections) {
+        if (thrystr::app::section_contains(section, index)) {
+            return &section;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<double> parity_wave_value_at(const thrystr::app::WorkspaceModel& workspace,
+                                           std::size_t index) {
+    if (workspace.parity_track_id == thrystr::app::kNoParityTrack) {
+        return std::nullopt;
+    }
+    const thrystr::app::Track* parity =
+        thrystr::app::find_track(workspace, workspace.parity_track_id);
+    if (!parity) {
+        return std::nullopt;
+    }
+    const thrystr::app::Section* section = section_for_index(parity->sections, index);
+    if (!section) {
+        return std::nullopt;
+    }
+    return thrystr::app::wave_value_at_index(*section, index);
+}
+
+struct FitReadout {
+    bool available = false;
+    std::uint8_t track_id = 0u;
+    std::optional<double> wave_scalar;
+    std::optional<double> parity_scalar;
+};
+
+FitReadout fit_readout_at(const AppState& state, std::size_t index) {
+    FitReadout readout;
+    if (!state.fitted_workspace_valid || state.fitted_workspace.tracks.empty()) {
+        return readout;
+    }
+
+    const thrystr::app::WorkspaceModel& workspace = state.fitted_workspace;
+    const std::uint8_t owner = workspace.parity_track_id == thrystr::app::kNoParityTrack
+                                   ? 0u
+                                   : thrystr::app::parity_owner_at(workspace, index);
+    const thrystr::app::Track* track = thrystr::app::find_track(workspace, owner);
+    if (!track || track->kind != thrystr::app::TrackKind::Data) {
+        return readout;
+    }
+    if (!track->owned_mask.empty() && !thrystr::app::get_owned_bit(track->owned_mask, index)) {
+        return readout;
+    }
+
+    const thrystr::app::Section* section = section_for_index(track->sections, index);
+    if (!section) {
+        return readout;
+    }
+    readout.available = true;
+    readout.track_id = owner;
+    readout.wave_scalar = thrystr::app::wave_value_at_index(*section, index);
+    readout.parity_scalar = parity_wave_value_at(workspace, index);
+    return readout;
+}
+
+void draw_data_ticker(const AppState& state, ImDrawList* draw, std::size_t first, std::size_t last,
+                      float plot_left, float plot_bottom, float x_step, const ImVec2& clip_min,
                       const ImVec2& clip_max) {
     if (!draw || source_sample_count(state) == 0u || last < first) {
         return;
     }
 
-    const float ticker_top = plot_bottom + 22.0f;
+    const float ticker_top = plot_bottom + 58.0f;
     const float ticker_bottom = clip_max.y - 8.0f;
     if (ticker_bottom <= ticker_top) {
         return;
     }
 
-    draw->AddRectFilled(ImVec2(clip_min.x, ticker_top - 4.0f),
-                        ImVec2(clip_max.x, ticker_bottom),
+    draw->AddRectFilled(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_bottom),
                         skald::tokens::surface::panel_alt);
-    draw->AddLine(ImVec2(clip_min.x, ticker_top - 4.0f),
-                  ImVec2(clip_max.x, ticker_top - 4.0f),
-                  skald::tokens::border::separator,
-                  1.0f);
+    draw->AddLine(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_top - 4.0f),
+                  skald::tokens::border::separator, 1.0f);
 
     const std::size_t stride = std::max<std::size_t>(
-        1u,
-        static_cast<std::size_t>(std::ceil(
-            static_cast<double>(kTickerTargetLabelPixels) /
-            std::max(1.0f, x_step))));
+        1u, static_cast<std::size_t>(
+                std::ceil(static_cast<double>(kTickerTargetLabelPixels) / std::max(1.0f, x_step))));
     const std::size_t start = first - (first % stride);
     for (std::size_t i = start; i <= last && i < source_sample_count(state); i += stride) {
         if (i == state.playhead_index) {
             continue;
         }
-        const std::optional<std::uint8_t> byte = ticker_byte_at(state, i);
+        const std::optional<std::uint64_t> byte = ticker_sample_at(state, i);
         if (!byte) {
             continue;
         }
-        const std::string label = hex_byte_text(*byte);
+        const std::string label = hex_sample_text(*byte, data_sample_bits(state));
         const float x = plot_left + static_cast<float>(i) * x_step;
         const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
-        draw->AddText(ImVec2(x - text_size.x * 0.5f, ticker_top),
-                      skald::tokens::ink::muted,
+        draw->AddText(ImVec2(x - text_size.x * 0.5f, ticker_top), skald::tokens::ink::muted,
                       label.c_str());
     }
 
     if (state.playhead_index < first || state.playhead_index > last) {
         return;
     }
-    const std::optional<std::uint8_t> current_byte =
-        ticker_byte_at(state, state.playhead_index);
+    const std::optional<std::uint64_t> current_byte = ticker_sample_at(state, state.playhead_index);
     if (!current_byte) {
         return;
     }
 
-    const std::string label = hex_byte_text(*current_byte);
+    const std::string label = hex_sample_text(*current_byte, data_sample_bits(state));
     const float x = plot_left + static_cast<float>(state.playhead_index) * x_step;
     ImFont* current_font = state.fonts.mono ? state.fonts.mono : ImGui::GetFont();
     const float current_font_size = ImGui::GetFontSize() * kTickerCurrentScale;
     const ImVec2 text_size =
-        current_font->CalcTextSizeA(current_font_size,
-                                    FLT_MAX,
-                                    0.0f,
-                                    label.c_str());
+        current_font->CalcTextSizeA(current_font_size, FLT_MAX, 0.0f, label.c_str());
     const ImVec2 text_pos(x - text_size.x * 0.5f, ticker_top);
     draw->AddRectFilled(ImVec2(text_pos.x - 6.0f, text_pos.y - 3.0f),
-                        ImVec2(text_pos.x + text_size.x + 6.0f,
-                               text_pos.y + text_size.y + 3.0f),
-                        skald::tokens::surface::control_hi,
-                        skald::tokens::radii::ctrl);
-    draw->AddText(current_font,
-                  current_font_size,
-                  text_pos,
-                  skald::tokens::ink::primary,
+                        ImVec2(text_pos.x + text_size.x + 6.0f, text_pos.y + text_size.y + 3.0f),
+                        skald::tokens::surface::control_hi, skald::tokens::radii::ctrl);
+    draw->AddText(current_font, current_font_size, text_pos, skald::tokens::ink::primary,
                   label.c_str());
 }
 
-void draw_fitted_sections(ImDrawList* draw,
-                          const AppState& state,
-                          std::size_t first,
-                          std::size_t last,
-                          float plot_left,
-                          float plot_top,
-                          float plot_bottom,
-                          float x_step,
-                          float y_zoom) {
+void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t first, std::size_t last,
+                       float plot_left, float plot_bottom, float x_step, const ImVec2& clip_min,
+                       const ImVec2& clip_max) {
+    if (!draw || !state.fitted_workspace_valid ||
+        state.fitted_workspace.parity_track_id == thrystr::app::kNoParityTrack || last < first) {
+        return;
+    }
+
+    const std::size_t track_span = data_track_span(state.fitted_workspace);
+    if (track_span < 2u) {
+        return;
+    }
+
+    const float strip_top = plot_bottom + 14.0f;
+    const float strip_bottom = std::min(plot_bottom + 46.0f, clip_max.y - 40.0f);
+    if (strip_bottom <= strip_top + 4.0f) {
+        return;
+    }
+
+    draw->AddRectFilled(ImVec2(clip_min.x, strip_top), ImVec2(clip_max.x, strip_bottom),
+                        skald::tokens::surface::panel_alt, skald::tokens::radii::ctrl);
+    draw->AddText(ImVec2(clip_min.x + 8.0f, strip_top + 8.0f), skald::tokens::ink::muted, "parity");
+
+    const float graph_left = clip_min.x + 58.0f;
+    const float graph_right = clip_max.x - 12.0f;
+    const double denom = static_cast<double>(std::max<std::size_t>(1u, track_span - 1u));
+    const auto y_for_track = [&](double value) {
+        const double normalized = std::clamp(value / denom, 0.0, 1.0);
+        return strip_bottom - static_cast<float>(normalized) * (strip_bottom - strip_top);
+    };
+
+    for (std::size_t track = 0; track < track_span; ++track) {
+        const float y = y_for_track(static_cast<double>(track));
+        draw->AddLine(ImVec2(graph_left, y), ImVec2(graph_right, y),
+                      skald::tokens::border::separator, 1.0f);
+    }
+
+    const std::size_t samples = std::min<std::size_t>(2048u, last - first + 1u);
+    ImVec2 previous{};
+    bool has_previous = false;
+    for (std::size_t sample = 0; sample < samples; ++sample) {
+        const double t =
+            samples > 1u ? static_cast<double>(sample) / static_cast<double>(samples - 1u) : 0.0;
+        const std::size_t index = static_cast<std::size_t>(
+            std::llround(static_cast<double>(first) + t * static_cast<double>(last - first)));
+        const std::optional<double> parity = parity_wave_value_at(state.fitted_workspace, index);
+        if (!parity) {
+            has_previous = false;
+            continue;
+        }
+        const ImVec2 point(plot_left + static_cast<float>(index) * x_step, y_for_track(*parity));
+        if (has_previous) {
+            draw->AddLine(previous, point, skald::tokens::accents::gold, 1.35f);
+        }
+        previous = point;
+        has_previous = true;
+    }
+
+    for (std::size_t index = first; index <= last && index < source_sample_count(state);
+         index += std::max<std::size_t>(1u, (last - first + 1u) / 256u)) {
+        const std::uint8_t owner = thrystr::app::parity_owner_at(state.fitted_workspace, index);
+        if (owner >= track_span) {
+            continue;
+        }
+        const float x = plot_left + static_cast<float>(index) * x_step;
+        draw->AddLine(ImVec2(x, y_for_track(static_cast<double>(owner)) - 3.0f),
+                      ImVec2(x, y_for_track(static_cast<double>(owner)) + 3.0f), kSelectionHandle,
+                      1.0f);
+    }
+}
+
+void draw_fitted_sections(ImDrawList* draw, const AppState& state, std::size_t first,
+                          std::size_t last, float plot_left, float plot_top, float plot_bottom,
+                          float x_step, float y_zoom) {
     if (!draw || state.fitted_sections.empty() || last < first) {
         return;
     }
 
-    for (std::size_t section_index = 0;
-         section_index < state.fitted_sections.size();
+    if (state.fitted_workspace_valid && !state.fitted_workspace.tracks.empty()) {
+        const std::size_t track_count =
+            std::max<std::size_t>(1u, data_track_count(state.fitted_workspace));
+        const float lane_gap = 3.0f;
+        const float lane_top = plot_top + 10.0f;
+        const float lane_height =
+            std::max(5.0f, std::min(18.0f, ((plot_bottom - plot_top) * 0.24f) /
+                                               static_cast<float>(track_count)));
+        std::size_t data_track_order = 0u;
+        for (const thrystr::app::Track& track : state.fitted_workspace.tracks) {
+            if (track.kind != thrystr::app::TrackKind::Data || !track.visible) {
+                continue;
+            }
+            const float lane_y0 =
+                lane_top + static_cast<float>(data_track_order) * (lane_height + lane_gap);
+            const float lane_y1 = lane_y0 + lane_height;
+            const ImU32 base_color = kWaveColors[data_track_order % kWaveColors.size()];
+            const ImU32 fill = skald::tokens::with_alpha(base_color, 30.0f / 255.0f);
+            const ImU32 edge = skald::tokens::with_alpha(base_color, 0.86f);
+            char label[24] = {};
+            std::snprintf(label, sizeof(label), "track %u", static_cast<unsigned>(track.id));
+            draw->AddText(ImVec2(plot_left + 8.0f, lane_y0 - 1.0f), edge, label);
+
+            for (const thrystr::app::Section& section : track.sections) {
+                if (section.length == 0u) {
+                    continue;
+                }
+                const std::size_t section_first = section.start_index;
+                const std::size_t section_last =
+                    static_cast<std::size_t>(thrystr::app::section_end(section) - 1u);
+                if (section_last < first || section_first > last) {
+                    continue;
+                }
+
+                const std::size_t visible_first = std::max(first, section_first);
+                const std::size_t visible_last = std::min(last, section_last);
+                const float x0 = plot_left + static_cast<float>(section_first) * x_step;
+                const float x1 = plot_left + static_cast<float>(section_last) * x_step;
+                draw->AddRectFilled(ImVec2(x0, lane_y0), ImVec2(x1, lane_y1), fill);
+                draw->AddRect(ImVec2(x0, lane_y0), ImVec2(x1, lane_y1), edge, 0.0f, 0, 1.0f);
+
+                const std::size_t samples =
+                    std::min<std::size_t>(1024u, visible_last - visible_first + 1u);
+                ImVec2 previous{};
+                bool has_previous = false;
+                for (std::size_t sample = 0; sample < samples; ++sample) {
+                    const double t = samples > 1u ? static_cast<double>(sample) /
+                                                        static_cast<double>(samples - 1u)
+                                                  : 0.0;
+                    const double index = static_cast<double>(visible_first) +
+                                         t * static_cast<double>(visible_last - visible_first);
+                    const double value = thrystr::app::wave_value_at_index(
+                        section, static_cast<std::size_t>(std::llround(index)));
+                    const ImVec2 point(
+                        plot_left + static_cast<float>(index) * x_step,
+                        y_for_value(static_cast<float>(value), plot_top, plot_bottom, y_zoom));
+                    if (has_previous) {
+                        draw->AddLine(previous, point, edge, 1.4f);
+                    }
+                    previous = point;
+                    has_previous = true;
+                }
+            }
+            ++data_track_order;
+        }
+        return;
+    }
+
+    for (std::size_t section_index = 0; section_index < state.fitted_sections.size();
          ++section_index) {
         const thrystr::app::Section& section = state.fitted_sections[section_index];
         if (section.length == 0u) {
@@ -3839,29 +4552,27 @@ void draw_fitted_sections(ImDrawList* draw,
         const ImU32 base_color = kWaveColors[section_index % kWaveColors.size()];
         const ImU32 fill = skald::tokens::with_alpha(base_color, 34.0f / 255.0f);
         const ImU32 edge = section.max_residual > section.fit_tolerance
-            ? skald::tokens::status::destructive
-            : skald::tokens::with_alpha(base_color, 0.88f);
+                               ? skald::tokens::status::destructive
+                               : skald::tokens::with_alpha(base_color, 0.88f);
         const float x0 = plot_left + static_cast<float>(section_first) * x_step;
         const float x1 = plot_left + static_cast<float>(section_last) * x_step;
         draw->AddRectFilled(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), fill);
         draw->AddRect(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), edge, 0.0f, 0, 1.2f);
 
-        const std::size_t samples =
-            std::min<std::size_t>(1024u, visible_last - visible_first + 1u);
+        const std::size_t samples = std::min<std::size_t>(1024u, visible_last - visible_first + 1u);
         ImVec2 previous{};
         bool has_previous = false;
         for (std::size_t sample = 0; sample < samples; ++sample) {
             const double t = samples > 1u
-                ? static_cast<double>(sample) / static_cast<double>(samples - 1u)
-                : 0.0;
+                                 ? static_cast<double>(sample) / static_cast<double>(samples - 1u)
+                                 : 0.0;
             const double index = static_cast<double>(visible_first) +
                                  t * static_cast<double>(visible_last - visible_first);
             const double value = thrystr::app::wave_value_at_index(
-                section,
-                static_cast<std::size_t>(std::llround(index)));
-            const ImVec2 point(plot_left + static_cast<float>(index) * x_step,
-                               y_for_value(static_cast<float>(value), plot_top,
-                                           plot_bottom, y_zoom));
+                section, static_cast<std::size_t>(std::llround(index)));
+            const ImVec2 point(
+                plot_left + static_cast<float>(index) * x_step,
+                y_for_value(static_cast<float>(value), plot_top, plot_bottom, y_zoom));
             if (has_previous) {
                 draw->AddLine(previous, point, edge, 1.4f);
             }
@@ -3872,30 +4583,27 @@ void draw_fitted_sections(ImDrawList* draw,
 }
 
 float playback_readout_width(const AppState& state) {
-    const std::size_t max_index = source_sample_count(state) == 0u
-        ? 0u
-        : source_sample_count(state) - 1u;
+    const std::size_t max_index =
+        source_sample_count(state) == 0u ? 0u : source_sample_count(state) - 1u;
     const std::string longest_index = "x " + format_count(max_index);
     const ImVec2 index_size = ImGui::CalcTextSize(longest_index.c_str());
     const ImVec2 hex_size = ImGui::CalcTextSize("hex FF");
-    return std::max(124.0f,
-                    std::max(index_size.x, hex_size.x) +
-                        ImGui::GetStyle().FramePadding.x * 2.0f);
+    const ImVec2 scalar_size = ImGui::CalcTextSize("wave -1.000000");
+    return std::max(228.0f, std::max({index_size.x, hex_size.x, scalar_size.x}) +
+                                ImGui::GetStyle().FramePadding.x * 2.0f);
 }
 
 void draw_plot(AppState& state) {
     ++state.plot_frame;
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    const float toolbox_width = state.workspace_open ? std::min(kToolboxWidth, viewport.x * 0.45f) : 0.0f;
+    const float toolbox_width =
+        state.workspace_open ? std::min(kToolboxWidth, viewport.x * 0.45f) : 0.0f;
     ImGui::SetNextWindowPos(ImVec2(0.0f, kTopChromeHeight));
     ImGui::SetNextWindowSize(ImVec2(std::max(120.0f, viewport.x - toolbox_width),
                                     std::max(120.0f, viewport.y - kTopChromeHeight)));
     ImGui::Begin("Waveform", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     if (!state.analysis || source_sample_count(state) == 0u) {
         const ImVec2 available = ImGui::GetContentRegionAvail();
@@ -3905,8 +4613,7 @@ void draw_plot(AppState& state) {
         const ImVec2 max = ImGui::GetItemRectMax();
         draw->AddRectFilled(min, max, skald::tokens::surface::window);
         draw->AddRect(min, max, skald::tokens::border::separator);
-        draw->AddText(ImVec2(min.x + 24.0f, min.y + 24.0f),
-                      skald::tokens::ink::muted,
+        draw->AddText(ImVec2(min.x + 24.0f, min.y + 24.0f), skald::tokens::ink::muted,
                       state.workspace_open ? "No source data" : "No workspace");
         ImGui::End();
         return;
@@ -3927,34 +4634,45 @@ void draw_plot(AppState& state) {
         toggle_xline_playback(state);
     }
     ImGui::SameLine();
-    const std::optional<std::uint8_t> playhead_byte =
-        ticker_byte_at(state, state.playhead_index);
-    const std::string playhead_hex = playhead_byte ? hex_byte_text(*playhead_byte) : "--";
+    const std::optional<std::uint64_t> playhead_byte =
+        ticker_sample_at(state, state.playhead_index);
+    const std::string playhead_hex =
+        playhead_byte ? hex_sample_text(*playhead_byte, data_sample_bits(state)) : "--";
+    const std::optional<thrystr::app::Scalar> playhead_scalar =
+        scalar_at(state, state.playhead_index);
+    const FitReadout fit_readout = fit_readout_at(state, state.playhead_index);
+    const std::string track_text = fit_readout.available
+                                       ? std::to_string(static_cast<unsigned>(fit_readout.track_id))
+                                       : std::string("--");
+    const std::string data_scalar_text =
+        playhead_scalar ? format_scalar(*playhead_scalar) : std::string("--");
+    const std::string wave_scalar_text =
+        fit_readout.wave_scalar ? format_scalar(*fit_readout.wave_scalar) : std::string("--");
     const float readout_width = playback_readout_width(state);
     const float readout_x = ImGui::GetCursorPosX();
     ImGui::BeginGroup();
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
-                       "x %s",
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "x %s",
                        format_count(state.playhead_index).c_str());
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
-                       "hex %s",
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "hex %s",
                        playhead_hex.c_str());
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "track %s",
+                       track_text.c_str());
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "data %s",
+                       data_scalar_text.c_str());
+    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "wave %s",
+                       wave_scalar_text.c_str());
     ImGui::EndGroup();
     ImGui::SameLine(readout_x + readout_width);
     if (playback_speed_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
-                              state.wheel_scroll_mode,
-                              102.0f)) {
+                              state.wheel_scroll_mode, 102.0f)) {
         state.wheel_scroll_mode = !state.wheel_scroll_mode;
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(state.wheel_scroll_mode
-                              ? "Mouse wheel scrolls the x timeline"
-                              : "Mouse wheel scales the x timeline");
+        ImGui::SetTooltip(state.wheel_scroll_mode ? "Mouse wheel scrolls the x timeline"
+                                                  : "Mouse wheel scales the x timeline");
     }
     ImGui::SameLine();
-    if (playback_speed_button("segment",
-                              state.segment_selection_mode,
-                              78.0f)) {
+    if (playback_speed_button("segment", state.segment_selection_mode, 78.0f)) {
         state.segment_selection_mode = !state.segment_selection_mode;
         state.selection_drag_handle = 0;
     }
@@ -3972,9 +4690,9 @@ void draw_plot(AppState& state) {
     const float margin_left = 58.0f;
     const float margin_right = 30.0f;
     const float margin_top = 28.0f;
-    const float margin_bottom = 84.0f;
-    const float logical_width = std::max(available.x,
-        margin_left + margin_right + static_cast<float>(count - 1) * x_step);
+    const float margin_bottom = 126.0f;
+    const float logical_width =
+        std::max(available.x, margin_left + margin_right + static_cast<float>(count - 1) * x_step);
 
     ImGui::BeginChild("##plot_scroll", ImVec2(0.0f, 0.0f), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
@@ -3982,36 +4700,29 @@ void draw_plot(AppState& state) {
     const ImVec2 child_pos = ImGui::GetWindowPos();
     const ImVec2 child_size = ImGui::GetWindowSize();
     const bool child_mouse_inside =
-        io.MousePos.x >= child_pos.x &&
-        io.MousePos.x <= child_pos.x + child_size.x &&
-        io.MousePos.y >= child_pos.y &&
-        io.MousePos.y <= child_pos.y + child_size.y;
+        io.MousePos.x >= child_pos.x && io.MousePos.x <= child_pos.x + child_size.x &&
+        io.MousePos.y >= child_pos.y && io.MousePos.y <= child_pos.y + child_size.y;
     const float child_width = ImGui::GetWindowWidth();
     const float max_scroll_x = std::max(0.0f, logical_width - child_width);
     const float native_scroll_x = ImGui::GetScrollX();
     const float scrollbar_height = ImGui::GetStyle().ScrollbarSize;
     const bool scrollbar_drag_in_progress =
-        child_mouse_inside &&
-        io.MouseDown[ImGuiMouseButton_Left] &&
+        child_mouse_inside && io.MouseDown[ImGuiMouseButton_Left] &&
         io.MousePos.y >= child_pos.y + child_size.y - scrollbar_height;
     state.timeline_scroll_x = std::clamp(state.timeline_scroll_x, 0.0f, max_scroll_x);
-    if (scrollbar_drag_in_progress &&
-        std::abs(native_scroll_x - state.timeline_scroll_x) > 0.5f) {
+    if (scrollbar_drag_in_progress && std::abs(native_scroll_x - state.timeline_scroll_x) > 0.5f) {
         state.timeline_scroll_x = std::clamp(native_scroll_x, 0.0f, max_scroll_x);
         state.last_manual_scroll_frame = state.plot_frame;
     }
     if (state.pending_scroll_index) {
-        const float target_scroll =
-            static_cast<float>(*state.pending_scroll_index) * x_step +
-            margin_left -
-            child_width * 0.5f;
+        const float target_scroll = static_cast<float>(*state.pending_scroll_index) * x_step +
+                                    margin_left - child_width * 0.5f;
         state.timeline_scroll_x = std::clamp(target_scroll, 0.0f, max_scroll_x);
         state.pending_scroll_index.reset();
     }
     const bool manual_scroll_recent =
         state.plot_frame >= state.last_manual_scroll_frame &&
-        state.plot_frame - state.last_manual_scroll_frame <=
-            kManualScrollAutoscrollInhibitFrames;
+        state.plot_frame - state.last_manual_scroll_frame <= kManualScrollAutoscrollInhibitFrames;
     if (state.xline_playing && !manual_scroll_recent) {
         const float playhead_local =
             margin_left + static_cast<float>(state.playhead_index) * x_step;
@@ -4021,18 +4732,11 @@ void draw_plot(AppState& state) {
                 std::clamp(playhead_local - child_width * 0.5f, 0.0f, max_scroll_x);
         }
     }
-    if (child_mouse_inside &&
-        state.wheel_scroll_mode &&
-        io.MouseWheel != 0.0f &&
-        !io.KeyCtrl &&
+    if (child_mouse_inside && state.wheel_scroll_mode && io.MouseWheel != 0.0f && !io.KeyCtrl &&
         !io.KeySuper) {
-        const float scroll_step =
-            std::clamp(child_width * 0.18f, 64.0f, 420.0f);
+        const float scroll_step = std::clamp(child_width * 0.18f, 64.0f, 420.0f);
         state.timeline_scroll_x =
-            std::clamp(state.timeline_scroll_x -
-                           io.MouseWheel * scroll_step,
-                       0.0f,
-                       max_scroll_x);
+            std::clamp(state.timeline_scroll_x - io.MouseWheel * scroll_step, 0.0f, max_scroll_x);
         state.last_manual_scroll_frame = state.plot_frame;
     }
     ImGui::InvisibleButton("##plot_canvas", ImVec2(logical_width, plot_height));
@@ -4052,31 +4756,23 @@ void draw_plot(AppState& state) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             state.zoom_y = std::max(0.01f, state.zoom_y * factor);
         } else if (io.KeyShift && !state.wheel_scroll_mode) {
-            const float scroll_step =
-                std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
-            state.timeline_scroll_x =
-                std::clamp(state.timeline_scroll_x - io.MouseWheel * scroll_step,
-                           0.0f,
-                           max_scroll_x);
+            const float scroll_step = std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
+            state.timeline_scroll_x = std::clamp(
+                state.timeline_scroll_x - io.MouseWheel * scroll_step, 0.0f, max_scroll_x);
             state.last_manual_scroll_frame = state.plot_frame;
         } else if (!state.wheel_scroll_mode) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             const float old_step = x_step;
-            const float mouse_index = std::clamp(
-                (io.MousePos.x - plot_left) / old_step,
-                0.0f,
-                static_cast<float>(count - 1u));
+            const float mouse_index = std::clamp((io.MousePos.x - plot_left) / old_step, 0.0f,
+                                                 static_cast<float>(count - 1u));
             state.zoom_x = std::max(0.01f, state.zoom_x * factor);
             const float new_step = plot_x_step(state);
             const float mouse_local_x = io.MousePos.x - child_pos.x;
             const float new_logical_width = std::max(
-                available.x,
-                margin_left + margin_right + static_cast<float>(count - 1) * new_step);
+                available.x, margin_left + margin_right + static_cast<float>(count - 1) * new_step);
             const float new_max_scroll_x = std::max(0.0f, new_logical_width - child_width);
-            state.timeline_scroll_x =
-                std::clamp(mouse_index * new_step + margin_left - mouse_local_x,
-                           0.0f,
-                           new_max_scroll_x);
+            state.timeline_scroll_x = std::clamp(
+                mouse_index * new_step + margin_left - mouse_local_x, 0.0f, new_max_scroll_x);
             state.last_manual_scroll_frame = state.plot_frame;
         }
     }
@@ -4085,30 +4781,22 @@ void draw_plot(AppState& state) {
     const float visible_width = child_width;
     const float index_left = std::max(0.0f, (visible_left_local - margin_left) / x_step);
     const float index_right = std::min(static_cast<float>(count - 1),
-        (visible_left_local + visible_width - margin_left) / x_step);
-    const std::size_t first = std::min(count - 1,
-        static_cast<std::size_t>(std::floor(std::max(0.0f, index_left))));
-    const std::size_t last = std::min(count - 1,
-        static_cast<std::size_t>(std::ceil(std::max(index_left, index_right))) + 2u);
+                                       (visible_left_local + visible_width - margin_left) / x_step);
+    const std::size_t first =
+        std::min(count - 1, static_cast<std::size_t>(std::floor(std::max(0.0f, index_left))));
+    const std::size_t last = std::min(
+        count - 1, static_cast<std::size_t>(std::ceil(std::max(index_left, index_right))) + 2u);
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const auto index_from_x = [&](float x) {
         const double index = std::round((x - plot_left) / x_step);
-        return static_cast<std::size_t>(
-            std::clamp(index, 0.0, static_cast<double>(count - 1u)));
+        return static_cast<std::size_t>(std::clamp(index, 0.0, static_cast<double>(count - 1u)));
     };
-    const auto index_from_mouse = [&]() {
-        return index_from_x(mouse.x);
-    };
-    const float playhead_hit_x =
-        plot_left + static_cast<float>(state.playhead_index) * x_step;
-    const bool playhead_hit =
-        std::abs(mouse.x - playhead_hit_x) <= kPlayheadScrubHitPixels &&
-        mouse.y >= plot_top &&
-        mouse.y <= clip_max.y;
+    const auto index_from_mouse = [&]() { return index_from_x(mouse.x); };
+    const float playhead_hit_x = plot_left + static_cast<float>(state.playhead_index) * x_step;
+    const bool playhead_hit = std::abs(mouse.x - playhead_hit_x) <= kPlayheadScrubHitPixels &&
+                              mouse.y >= plot_top && mouse.y <= clip_max.y;
     bool playhead_scrub_claimed = state.playhead_dragging;
-    if (plot_hovered &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
-        playhead_hit) {
+    if (plot_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && playhead_hit) {
         state.playhead_dragging = true;
         state.xline_playing = false;
         state.playhead_fraction = 0.0;
@@ -4123,8 +4811,7 @@ void draw_plot(AppState& state) {
             state.playhead_dragging = false;
         }
     }
-    ensure_lazy_blocks(state,
-                       std::min(first, state.playhead_index),
+    ensure_lazy_blocks(state, std::min(first, state.playhead_index),
                        std::max(last, state.playhead_index));
 
     auto* draw = ImGui::GetWindowDrawList();
@@ -4149,22 +4836,20 @@ void draw_plot(AppState& state) {
     const std::size_t tick_start = first - (first % tick);
     for (std::size_t i = tick_start; i <= last && i < count; i += tick) {
         const float x = plot_left + static_cast<float>(i) * x_step;
-        draw->AddLine(ImVec2(x, plot_top), ImVec2(x, plot_bottom),
-                      skald::tokens::border::separator, 1.0f);
+        draw->AddLine(ImVec2(x, plot_top), ImVec2(x, plot_bottom), skald::tokens::border::separator,
+                      1.0f);
         char label[32] = {};
         std::snprintf(label, sizeof(label), "%.0f nm", static_cast<double>(i) * period_nm);
-        draw->AddText(ImVec2(x + 4.0f, plot_bottom + 8.0f),
-                      skald::tokens::ink::muted, label);
+        draw->AddText(ImVec2(x + 4.0f, plot_bottom + 8.0f), skald::tokens::ink::muted, label);
     }
 
     const std::size_t delta_index = std::min(analysis.window.delta_index, count - 1);
     if (delta_index >= first && delta_index <= last) {
         const float x = plot_left + static_cast<float>(delta_index) * x_step;
         draw->AddRectFilled(ImVec2(x - 2.0f, plot_top),
-                            ImVec2(x + std::max(2.0f, x_step + 2.0f), plot_bottom),
-                            kMaxDeltaFill);
-        draw->AddText(ImVec2(x + 6.0f, plot_top + 6.0f),
-                      skald::tokens::status::destructive, "max delta");
+                            ImVec2(x + std::max(2.0f, x_step + 2.0f), plot_bottom), kMaxDeltaFill);
+        draw->AddText(ImVec2(x + 6.0f, plot_top + 6.0f), skald::tokens::status::destructive,
+                      "max delta");
     }
 
     if (state.segment.active) {
@@ -4172,21 +4857,15 @@ void draw_plot(AppState& state) {
         const auto [selection_first, selection_last] = normalized_selection(state);
         const float start_x = plot_left + static_cast<float>(selection_first) * x_step;
         const float end_x = plot_left + static_cast<float>(selection_last) * x_step;
-        draw->AddRectFilled(ImVec2(start_x, plot_top), ImVec2(end_x, plot_bottom),
-                            kSelectionFill);
-        draw->AddLine(ImVec2(start_x, plot_top), ImVec2(start_x, plot_bottom),
-                      kSelectionEdge, 2.0f);
-        draw->AddLine(ImVec2(end_x, plot_top), ImVec2(end_x, plot_bottom),
-                      kSelectionEdge, 2.0f);
-        draw->AddCircleFilled(ImVec2(start_x, plot_top + 8.0f), 4.0f,
-                              kSelectionHandle);
-        draw->AddCircleFilled(ImVec2(end_x, plot_top + 8.0f), 4.0f,
-                              kSelectionHandle);
+        draw->AddRectFilled(ImVec2(start_x, plot_top), ImVec2(end_x, plot_bottom), kSelectionFill);
+        draw->AddLine(ImVec2(start_x, plot_top), ImVec2(start_x, plot_bottom), kSelectionEdge,
+                      2.0f);
+        draw->AddLine(ImVec2(end_x, plot_top), ImVec2(end_x, plot_bottom), kSelectionEdge, 2.0f);
+        draw->AddCircleFilled(ImVec2(start_x, plot_top + 8.0f), 4.0f, kSelectionHandle);
+        draw->AddCircleFilled(ImVec2(end_x, plot_top + 8.0f), 4.0f, kSelectionHandle);
     }
 
-    if (plot_hovered &&
-        !playhead_scrub_claimed &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (plot_hovered && !playhead_scrub_claimed && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const std::size_t index = index_from_mouse();
         if (!state.segment_selection_mode) {
             set_playhead_index(state, index, false);
@@ -4229,15 +4908,17 @@ void draw_plot(AppState& state) {
     const bool draw_data = data == nullptr || data->visible;
     if (draw_data && state.show_lines && !state.show_reconstruction_only) {
         for (std::size_t i = first; i < last && i + 1 < count; ++i) {
-            const std::optional<float> scalar_a = scalar_at(state, i);
-            const std::optional<float> scalar_b = scalar_at(state, i + 1u);
+            const std::optional<thrystr::app::Scalar> scalar_a = scalar_at(state, i);
+            const std::optional<thrystr::app::Scalar> scalar_b = scalar_at(state, i + 1u);
             if (!scalar_a || !scalar_b) {
                 continue;
             }
-            const ImVec2 a(plot_left + static_cast<float>(i) * x_step,
-                           y_for_value(*scalar_a, plot_top, plot_bottom, y_zoom));
-            const ImVec2 b(plot_left + static_cast<float>(i + 1) * x_step,
-                           y_for_value(*scalar_b, plot_top, plot_bottom, y_zoom));
+            const ImVec2 a(
+                plot_left + static_cast<float>(i) * x_step,
+                y_for_value(static_cast<float>(*scalar_a), plot_top, plot_bottom, y_zoom));
+            const ImVec2 b(
+                plot_left + static_cast<float>(i + 1) * x_step,
+                y_for_value(static_cast<float>(*scalar_b), plot_top, plot_bottom, y_zoom));
             draw->AddLine(a, b, kDataLineColor, 1.2f);
         }
     }
@@ -4252,16 +4933,14 @@ void draw_plot(AppState& state) {
         ImVec2 previous{};
         bool has_previous = false;
         for (std::size_t sample = 0; sample < samples; ++sample) {
-            const double t = samples > 1
-                ? static_cast<double>(sample) / static_cast<double>(samples - 1u)
-                : 0.0;
-            const double index = static_cast<double>(first) +
-                                 t * static_cast<double>(last - first);
+            const double t =
+                samples > 1 ? static_cast<double>(sample) / static_cast<double>(samples - 1u) : 0.0;
+            const double index = static_cast<double>(first) + t * static_cast<double>(last - first);
             const double x_nm = index * period_nm;
             const double value = wave_value_at_nm(entity.wave, x_nm);
-            const ImVec2 point(plot_left + static_cast<float>(index) * x_step,
-                               y_for_value(static_cast<float>(value), plot_top,
-                                           plot_bottom, y_zoom));
+            const ImVec2 point(
+                plot_left + static_cast<float>(index) * x_step,
+                y_for_value(static_cast<float>(value), plot_top, plot_bottom, y_zoom));
             if (has_previous) {
                 draw->AddLine(previous, point, color, 1.5f);
             }
@@ -4270,72 +4949,45 @@ void draw_plot(AppState& state) {
         }
     }
 
-    draw_fitted_sections(draw,
-                         state,
-                         first,
-                         last,
-                         plot_left,
-                         plot_top,
-                         plot_bottom,
-                         x_step,
+    draw_fitted_sections(draw, state, first, last, plot_left, plot_top, plot_bottom, x_step,
                          y_zoom);
 
     if (draw_data && state.show_points && !state.show_reconstruction_only) {
-        draw_data_point_markers(draw,
-                                state,
-                                first,
-                                last,
-                                plot_left,
-                                plot_top,
-                                plot_bottom,
-                                x_step,
-                                y_zoom,
-                                clip_min,
-                                clip_max);
+        draw_data_point_markers(draw, state, first, last, plot_left, plot_top, plot_bottom, x_step,
+                                y_zoom, clip_min, clip_max);
     }
 
     draw->AddRect(ImVec2(plot_left, plot_top), ImVec2(plot_right, plot_bottom),
                   skald::tokens::border::default_, 0.0f, 0, 1.0f);
     draw->AddText(ImVec2(child_pos.x + margin_left, child_pos.y + 8.0f),
                   skald::tokens::ink::primary, "x-line section");
-    draw->AddText(ImVec2(child_pos.x + child_size.x - 178.0f, child_pos.y + 8.0f),
-                  kDataLineColor, "data");
-    draw->AddText(ImVec2(child_pos.x + child_size.x - 108.0f, child_pos.y + 8.0f),
-                  kWaveColors[0], "waves");
+    draw->AddText(ImVec2(child_pos.x + child_size.x - 178.0f, child_pos.y + 8.0f), kDataLineColor,
+                  "data");
+    draw->AddText(ImVec2(child_pos.x + child_size.x - 108.0f, child_pos.y + 8.0f), kWaveColors[0],
+                  "waves");
     if (state.show_reconstruction_only) {
-        draw->AddRectFilled(ImVec2(child_pos.x + margin_left, child_pos.y + 28.0f),
-                            ImVec2(child_pos.x + margin_left + 118.0f,
-                                   child_pos.y + 52.0f),
-                            skald::tokens::with_alpha(skald::tokens::status::warning,
-                                                      48.0f / 255.0f),
-                            skald::tokens::radii::pill);
+        draw->AddRectFilled(
+            ImVec2(child_pos.x + margin_left, child_pos.y + 28.0f),
+            ImVec2(child_pos.x + margin_left + 118.0f, child_pos.y + 52.0f),
+            skald::tokens::with_alpha(skald::tokens::status::warning, 48.0f / 255.0f),
+            skald::tokens::radii::pill);
         draw->AddText(ImVec2(child_pos.x + margin_left + 12.0f, child_pos.y + 33.0f),
-                      skald::tokens::status::warning,
-                      "reconstruction");
+                      skald::tokens::status::warning, "reconstruction");
     }
 
     if (state.playhead_index >= first && state.playhead_index <= last) {
         const float playhead_x = plot_left + static_cast<float>(state.playhead_index) * x_step;
-        draw->AddLine(ImVec2(playhead_x, plot_top),
-                      ImVec2(playhead_x, clip_max.y - 8.0f),
-                      kSelectionHandle,
-                      2.0f);
-        if (const std::optional<float> scalar = scalar_at(state, state.playhead_index)) {
-            draw->AddCircleFilled(ImVec2(playhead_x,
-                                         y_for_value(*scalar, plot_top, plot_bottom, y_zoom)),
-                                  4.0f,
-                                  kSelectionHandle);
+        draw->AddLine(ImVec2(playhead_x, plot_top), ImVec2(playhead_x, clip_max.y - 8.0f),
+                      kSelectionHandle, 2.0f);
+        if (const std::optional<thrystr::app::Scalar> scalar =
+                scalar_at(state, state.playhead_index)) {
+            draw->AddCircleFilled(ImVec2(playhead_x, y_for_value(static_cast<float>(*scalar),
+                                                                 plot_top, plot_bottom, y_zoom)),
+                                  4.0f, kSelectionHandle);
         }
     }
-    draw_data_ticker(state,
-                     draw,
-                     first,
-                     last,
-                     plot_left,
-                     plot_bottom,
-                     x_step,
-                     clip_min,
-                     clip_max);
+    draw_parity_strip(draw, state, first, last, plot_left, plot_bottom, x_step, clip_min, clip_max);
+    draw_data_ticker(state, draw, first, last, plot_left, plot_bottom, x_step, clip_min, clip_max);
 
     draw->PopClipRect();
     ImGui::EndChild();
@@ -4344,8 +4996,7 @@ void draw_plot(AppState& state) {
 
 void navigate_file_dialog_selection(AppState& state) {
     const int row = state.file_dialog.row_sel;
-    if (row == state.file_dialog_last_row ||
-        row < 0 ||
+    if (row == state.file_dialog_last_row || row < 0 ||
         row >= static_cast<int>(state.file_dialog_rows.size())) {
         return;
     }
@@ -4384,11 +5035,9 @@ const char* file_dialog_popup_label(DialogPurpose purpose) {
     return kFileDialogStableId;
 }
 
-skald::FileDialogResult begin_chromed_file_dialog(
-    DialogPurpose purpose,
-    skald::FileDialogMode mode,
-    skald::FileDialogState& dialog,
-    std::span<const skald::FileDialogEntry> entries) {
+skald::FileDialogResult begin_chromed_file_dialog(DialogPurpose purpose, skald::FileDialogMode mode,
+                                                  skald::FileDialogState& dialog,
+                                                  std::span<const skald::FileDialogEntry> entries) {
     return skald::BeginFileDialog(file_dialog_popup_label(purpose), mode, dialog, entries);
 }
 
@@ -4410,12 +5059,10 @@ void draw_file_dialog(AppState& state) {
     const std::string cwd_before = state.file_dialog.cwd;
     const std::string filter_before = state.file_dialog.filter;
     const skald::FileDialogMode mode = state.active_dialog == DialogPurpose::SaveWave
-        ? skald::FileDialogMode::Save
-        : skald::FileDialogMode::Open;
+                                           ? skald::FileDialogMode::Save
+                                           : skald::FileDialogMode::Open;
     const skald::FileDialogResult result = begin_chromed_file_dialog(
-        state.active_dialog,
-        mode,
-        state.file_dialog,
+        state.active_dialog, mode, state.file_dialog,
         std::span<const skald::FileDialogEntry>(state.file_dialog_entries.data(),
                                                 state.file_dialog_entries.size()));
 
@@ -4471,38 +5118,31 @@ std::string lowercase_ascii(std::string_view text) {
     std::string out;
     out.reserve(text.size());
     for (char ch : text) {
-        out.push_back(static_cast<char>(
-            std::tolower(static_cast<unsigned char>(ch))));
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
     }
     return out;
 }
 
-bool text_matches_query(std::string_view title,
-                        std::string_view body,
-                        std::string_view query) {
+bool text_matches_query(std::string_view title, std::string_view body, std::string_view query) {
     const std::string needle = lowercase_ascii(query);
     if (needle.empty()) {
         return true;
     }
-    const std::string haystack = lowercase_ascii(
-        std::string(title) + "\n" + std::string(body));
+    const std::string haystack = lowercase_ascii(std::string(title) + "\n" + std::string(body));
     return haystack.find(needle) != std::string::npos;
 }
 
 void draw_markdown_body(std::string_view markdown, const skald::Fonts& fonts) {
     std::string line;
     const auto flush_line = [&](std::string_view text) {
-        if (text.rfind("### ", 0) == 0 ||
-            text.rfind("## ", 0) == 0 ||
-            text.rfind("# ", 0) == 0) {
-            const std::size_t offset = text.rfind("### ", 0) == 0
-                ? 4u
-                : text.rfind("## ", 0) == 0 ? 3u : 2u;
+        if (text.rfind("### ", 0) == 0 || text.rfind("## ", 0) == 0 || text.rfind("# ", 0) == 0) {
+            const std::size_t offset = text.rfind("### ", 0) == 0  ? 4u
+                                       : text.rfind("## ", 0) == 0 ? 3u
+                                                                   : 2u;
             if (fonts.sans_md) {
                 ImGui::PushFont(fonts.sans_md);
             }
-            ImGui::TextWrapped("%.*s",
-                               static_cast<int>(text.size() - offset),
+            ImGui::TextWrapped("%.*s", static_cast<int>(text.size() - offset),
                                text.data() + offset);
             if (fonts.sans_md) {
                 ImGui::PopFont();
@@ -4511,15 +5151,11 @@ void draw_markdown_body(std::string_view markdown, const skald::Fonts& fonts) {
             return;
         }
         if (text.rfind("- ", 0) == 0) {
-            ImGui::BulletText("%.*s",
-                              static_cast<int>(text.size() - 2u),
-                              text.data() + 2u);
+            ImGui::BulletText("%.*s", static_cast<int>(text.size() - 2u), text.data() + 2u);
             return;
         }
         if (!text.empty()) {
-            ImGui::TextWrapped("%.*s",
-                               static_cast<int>(text.size()),
-                               text.data());
+            ImGui::TextWrapped("%.*s", static_cast<int>(text.size()), text.data());
         } else {
             ImGui::Dummy(ImVec2(0.0f, 6.0f));
         }
@@ -4568,8 +5204,7 @@ void draw_docs_panel(AppState& state) {
         if (!text_matches_query(pages[i].title, pages[i].markdown, state.docs_search)) {
             continue;
         }
-        if (ImGui::Selectable(pages[i].title.data(),
-                              state.docs_page == static_cast<int>(i))) {
+        if (ImGui::Selectable(pages[i].title.data(), state.docs_page == static_cast<int>(i))) {
             state.docs_page = static_cast<int>(i);
         }
     }
@@ -4577,8 +5212,7 @@ void draw_docs_panel(AppState& state) {
 
     ImGui::SameLine();
     ImGui::BeginChild("##docs_body", ImVec2(0.0f, 0.0f), true);
-    draw_markdown_body(pages[static_cast<std::size_t>(state.docs_page)].markdown,
-                       state.fonts);
+    draw_markdown_body(pages[static_cast<std::size_t>(state.docs_page)].markdown, state.fonts);
     ImGui::EndChild();
 #else
     skald::KvRowStatus("manual", "not built", skald::BadgeTone::Warning);
@@ -4592,8 +5226,7 @@ void handle_shortcuts(AppState& state) {
     if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) {
         state.show_docs = !state.show_docs;
     }
-    if (io.WantTextInput ||
-        state.active_dialog != DialogPurpose::None ||
+    if (io.WantTextInput || state.active_dialog != DialogPurpose::None ||
         state.pending_dialog != DialogPurpose::None) {
         return;
     }
@@ -4609,8 +5242,8 @@ void handle_shortcuts(AppState& state) {
         }
     }
     const bool shortcut = io.KeyCtrl || io.KeySuper;
-    if (shortcut && (ImGui::IsKeyPressed(ImGuiKey_W, false) ||
-                     ImGui::IsKeyPressed(ImGuiKey_A, false))) {
+    if (shortcut &&
+        (ImGui::IsKeyPressed(ImGuiKey_W, false) || ImGui::IsKeyPressed(ImGuiKey_A, false))) {
         create_wave_entity(state);
     }
     if (shortcut && ImGui::IsKeyPressed(ImGuiKey_N, false)) {
@@ -4632,7 +5265,7 @@ void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors)
     handle_custom_chrome(state, window, cursors);
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     const Args args = parse_args(argc, argv);
@@ -4680,11 +5313,9 @@ int main(int argc, char** argv) {
         glfwGetFramebufferSize(target, &fb_width, &fb_height);
         glViewport(0, 0, fb_width, fb_height);
         constexpr ImU32 bg = skald::tokens::surface::deep;
-        glClearColor(
-            static_cast<float>((bg >> IM_COL32_R_SHIFT) & 0xff) / 255.0f,
-            static_cast<float>((bg >> IM_COL32_G_SHIFT) & 0xff) / 255.0f,
-            static_cast<float>((bg >> IM_COL32_B_SHIFT) & 0xff) / 255.0f,
-            1.0f);
+        glClearColor(static_cast<float>((bg >> IM_COL32_R_SHIFT) & 0xff) / 255.0f,
+                     static_cast<float>((bg >> IM_COL32_G_SHIFT) & 0xff) / 255.0f,
+                     static_cast<float>((bg >> IM_COL32_B_SHIFT) & 0xff) / 255.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(target);
@@ -4694,13 +5325,9 @@ int main(int argc, char** argv) {
     StartupAction startup_action = StartupAction::None;
     bool screenshot_saved = false;
     if (args.file.empty()) {
-        GLFWwindow* splash_window = create_undecorated_window(kSplashWindowWidth,
-                                                              kSplashWindowHeight,
-                                                              "thrystr start",
-                                                              kSplashMinWindowWidth,
-                                                              kSplashMinWindowHeight,
-                                                              false,
-                                                              false);
+        GLFWwindow* splash_window =
+            create_undecorated_window(kSplashWindowWidth, kSplashWindowHeight, "thrystr start",
+                                      kSplashMinWindowWidth, kSplashMinWindowHeight, false, false);
         if (!splash_window) {
             destroy_chrome_cursors(chrome_cursors);
             glfwTerminate();
@@ -4733,8 +5360,7 @@ int main(int argc, char** argv) {
             ++rendered_frames;
             if (!args.screenshot.empty() && rendered_frames >= args.frames) {
                 if (!thrystr::save_screenshot_png(args.screenshot, fb_width, fb_height)) {
-                    std::fprintf(stderr,
-                                 "could not write screenshot: %s\n",
+                    std::fprintf(stderr, "could not write screenshot: %s\n",
                                  args.screenshot.c_str());
                 }
                 screenshot_saved = true;
@@ -4795,13 +5421,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    GLFWwindow* window = create_undecorated_window(workspace_width,
-                                                  workspace_height,
-                                                  "thrystr",
-                                                  kMinWindowWidth,
-                                                  kMinWindowHeight,
-                                                  true,
-                                                  false);
+    GLFWwindow* window = create_undecorated_window(workspace_width, workspace_height, "thrystr",
+                                                   kMinWindowWidth, kMinWindowHeight, true, false);
     if (!window) {
         destroy_chrome_cursors(chrome_cursors);
         glfwTerminate();

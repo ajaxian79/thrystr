@@ -10,8 +10,8 @@
 
 namespace {
 
-std::vector<float> sample_section(const thrystr::app::Section& section) {
-    std::vector<float> values;
+std::vector<thrystr::app::Scalar> sample_section(const thrystr::app::Section& section) {
+    std::vector<thrystr::app::Scalar> values;
     values.reserve(section.length);
     for (std::size_t i = 0; i < section.length; ++i) {
         values.push_back(static_cast<float>(
@@ -37,13 +37,13 @@ void test_owned_mask_helpers() {
 }
 
 void test_two_point_fit_is_exact() {
-    const std::vector<float> values = {-0.75f, 0.625f};
+    const std::vector<thrystr::app::Scalar> values = {-0.75f, 0.625f};
     thrystr::app::ConvergentFitOptions options;
     const thrystr::app::Section section =
         thrystr::app::fit_section(values, 0, values.size(), options);
     assert(section.length == 2);
-    const thrystr::app::ValidationReport report =
-        thrystr::app::validate_sections(values, std::span<const thrystr::app::Section>(&section, 1));
+    const thrystr::app::ValidationReport report = thrystr::app::validate_sections(
+        values, std::span<const thrystr::app::Section>(&section, 1));
     assert(report.pass);
     assert(report.max_residual < 1.0e-9);
 }
@@ -57,7 +57,7 @@ void test_pure_sine_input_yields_single_section() {
     source.wave_amplitude = 2.0;
     source.wave_amplitude_offset = -1.0;
     source.wave_phase_nm = 0.0;
-    const std::vector<float> values = sample_section(source);
+    const std::vector<thrystr::app::Scalar> values = sample_section(source);
 
     thrystr::app::ConvergentFitOptions options;
     options.tolerance = 0.025;
@@ -74,7 +74,7 @@ void test_pure_sine_input_yields_single_section() {
 }
 
 void test_noise_fit_covers_every_sample() {
-    std::vector<float> values;
+    std::vector<thrystr::app::Scalar> values;
     values.reserve(64);
     std::uint32_t state = 0x1234abcd;
     for (int i = 0; i < 64; ++i) {
@@ -94,7 +94,7 @@ void test_noise_fit_covers_every_sample() {
 }
 
 void test_track_validation_detects_overlap() {
-    const std::vector<float> values = {0.0f, 0.25f, 0.5f, 0.75f};
+    const std::vector<thrystr::app::Scalar> values = {0.0f, 0.25f, 0.5f, 0.75f};
     thrystr::app::WorkspaceModel workspace;
     workspace.tracks.push_back(thrystr::app::make_full_data_track(0, values.size()));
     workspace.tracks.push_back(thrystr::app::make_full_data_track(1, values.size()));
@@ -105,23 +105,20 @@ void test_track_validation_detects_overlap() {
     section.wave_amplitude_offset = 0.0;
     workspace.tracks[0].sections.push_back(section);
     workspace.tracks[1].sections.push_back(section);
-    const thrystr::app::ValidationReport report =
-        thrystr::app::validate_tracks(values, workspace);
+    const thrystr::app::ValidationReport report = thrystr::app::validate_tracks(values, workspace);
     assert(!report.pass);
 }
 
 void test_track_validation_passes_single_track() {
-    const std::vector<float> values = {0.0f, 0.25f};
+    const std::vector<thrystr::app::Scalar> values = {0.0f, 0.25f};
     thrystr::app::WorkspaceModel workspace;
     workspace.tracks.push_back(thrystr::app::make_full_data_track(0, values.size()));
-    workspace.tracks[0].sections.push_back(
-        thrystr::app::fit_section(values, 0, values.size()));
-    const thrystr::app::ValidationReport report =
-        thrystr::app::validate_tracks(values, workspace);
+    workspace.tracks[0].sections.push_back(thrystr::app::fit_section(values, 0, values.size()));
+    const thrystr::app::ValidationReport report = thrystr::app::validate_tracks(values, workspace);
     assert(report.pass);
 }
 
-}  // namespace
+} // namespace
 
 int main() {
     test_owned_mask_helpers();

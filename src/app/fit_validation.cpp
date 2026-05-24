@@ -4,13 +4,29 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#include <quadmath.h>
+#endif
 
 namespace thrystr::app {
 namespace {
 
+constexpr std::size_t kMaxValidationIssues = 256u;
+
+double scalar_abs_to_double(Scalar value) {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    return static_cast<double>(fabsq(value));
+#else
+    return static_cast<double>(std::abs(value));
+#endif
+}
+
 void fail(ValidationReport& report, std::string message, std::size_t track_index = 0,
           std::size_t section_index = 0, std::size_t sample_index = 0) {
     report.pass = false;
+    if (report.issues.size() >= kMaxValidationIssues) {
+        return;
+    }
     report.issues.push_back(ValidationIssue{
         std::move(message),
         track_index,
@@ -46,7 +62,7 @@ const Section* containing_section(std::span<const Section> sections, std::size_t
 
 } // namespace
 
-ValidationReport validate_sections(std::span<const float> scalars,
+ValidationReport validate_sections(std::span<const Scalar> scalars,
                                    std::span<const Section> sections) {
     ValidationReport report;
     std::size_t expected_start = 0;
@@ -66,7 +82,7 @@ ValidationReport validate_sections(std::span<const float> scalars,
         }
         for (std::size_t index = section.start_index; index < section_end(section); ++index) {
             const double residual =
-                std::abs(wave_value_at_index(section, index) - static_cast<double>(scalars[index]));
+                scalar_abs_to_double(wave_value_at_index(section, index) - scalars[index]);
             record_residual(report, residual);
             if (residual > section.fit_tolerance) {
                 fail(report, "section residual exceeds tolerance", 0, section_index, index);
@@ -81,7 +97,7 @@ ValidationReport validate_sections(std::span<const float> scalars,
     return report;
 }
 
-ValidationReport validate_tracks(std::span<const float> scalars, const WorkspaceModel& workspace,
+ValidationReport validate_tracks(std::span<const Scalar> scalars, const WorkspaceModel& workspace,
                                  double parity_margin) {
     ValidationReport report;
     if (workspace.tracks.empty() || workspace.tracks.size() > kMaxTracks) {
@@ -144,8 +160,8 @@ ValidationReport validate_tracks(std::span<const float> scalars, const Workspace
                      index);
                 continue;
             }
-            const double residual = std::abs(wave_value_at_index(*section, index) -
-                                             static_cast<double>(scalars[index]));
+            const double residual =
+                scalar_abs_to_double(wave_value_at_index(*section, index) - scalars[index]);
             record_residual(report, residual);
             if (residual > section->fit_tolerance) {
                 fail(report, "data track residual exceeds tolerance", track_index, section_index,
@@ -165,7 +181,8 @@ ValidationReport validate_tracks(std::span<const float> scalars, const Workspace
                 continue;
             }
             const double expected = static_cast<double>(owner[index]);
-            const double residual = std::abs(wave_value_at_index(*section, index) - expected);
+            const double residual = scalar_abs_to_double(wave_value_at_index(*section, index) -
+                                                         static_cast<Scalar>(expected));
             if (residual > 0.5 - parity_margin) {
                 fail(report, "parity routing residual exceeds rounding margin", parity_index,
                      section_index, index);

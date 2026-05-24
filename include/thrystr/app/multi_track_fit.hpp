@@ -18,6 +18,10 @@ struct MultiTrackOptions {
     double default_spacing_nm = kDefaultSectionSpacingNm;
     double parity_margin = 0.4;
     std::size_t max_section_length = 4096u;
+    std::size_t min_segment_length = kMinSegmentSize;
+    std::size_t max_owned_points_per_curve = 6u;
+    int wavelength_steps = 12;
+    int phase_steps = 12;
     std::uint8_t min_data_tracks = 2u;
     std::uint8_t max_data_tracks = 8u;
     bool allow_single_track_fallback = true;
@@ -37,10 +41,10 @@ struct MultiTrackFitResult {
 std::uint8_t parity_owner_at(const WorkspaceModel& workspace, std::size_t index);
 
 /// Reconstruct one sample from the fitted workspace.
-double reconstructed_value_at(const WorkspaceModel& workspace, std::size_t index);
+Scalar reconstructed_value_at(const WorkspaceModel& workspace, std::size_t index);
 
 /// Fit a workspace and choose multi-track only when it beats single-track cost.
-MultiTrackFitResult fit_multi_track_sections(std::span<const float> scalars,
+MultiTrackFitResult fit_multi_track_sections(std::span<const Scalar> scalars,
                                              const MultiTrackOptions& options = {});
 
 } // namespace thrystr::app

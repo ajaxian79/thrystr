@@ -15,8 +15,8 @@ struct ConvergentFitOptions {
     double tolerance = kDefaultSectionTolerance;
     double default_spacing_nm = kDefaultSectionSpacingNm;
     std::size_t max_section_length = 4096u;
-    int wavelength_steps = 48;
-    int phase_steps = 48;
+    int wavelength_steps = 12;
+    int phase_steps = 12;
     const std::atomic<bool>* cancel_requested = nullptr;
 };
 
@@ -29,11 +29,11 @@ struct ConvergentFitResult {
 };
 
 /// Fit one section over `[start, start + length)`.
-Section fit_section(std::span<const float> scalars, std::size_t start, std::size_t length,
+Section fit_section(std::span<const Scalar> scalars, std::size_t start, std::size_t length,
                     const ConvergentFitOptions& options = {});
 
 /// Greedily tile the scalar series with fitted sections.
-ConvergentFitResult fit_convergent_sections(std::span<const float> scalars,
+ConvergentFitResult fit_convergent_sections(std::span<const Scalar> scalars,
                                             const ConvergentFitOptions& options = {});
 
 } // namespace thrystr::app

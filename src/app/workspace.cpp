@@ -5,8 +5,31 @@
 #include <bit>
 #include <cmath>
 #include <numbers>
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#include <quadmath.h>
+#endif
 
 namespace thrystr::app {
+namespace {
+
+Scalar scalar_sin(Scalar value) {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    return sinq(value);
+#else
+    return std::sin(value);
+#endif
+}
+
+Scalar scalar_pi() {
+#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+    static const Scalar pi = strtoflt128("3.141592653589793238462643383279502884", nullptr);
+    return pi;
+#else
+    return std::numbers::pi_v<Scalar>;
+#endif
+}
+
+} // namespace
 
 std::uint64_t section_end(const Section& section) {
     return static_cast<std::uint64_t>(section.start_index) +
@@ -17,18 +40,23 @@ bool section_contains(const Section& section, std::size_t index) {
     return index >= section.start_index && index < section_end(section);
 }
 
-double wave_value_at_index(const Section& section, std::size_t index) {
+Scalar wave_value_at_index(const Section& section, std::size_t index) {
     if (section.wave_amplitude == 0.0) {
-        return section.wave_amplitude_offset;
+        return static_cast<Scalar>(section.wave_amplitude_offset);
     }
 
-    const double spacing = std::max(1.0e-12, section.section_spacing_nm);
-    const double wavelength = std::max(1.0e-12, section.wave_wavelength_nm);
-    const double local_index =
-        static_cast<double>(index >= section.start_index ? index - section.start_index : 0u);
-    const double x_nm = local_index * spacing;
-    const double theta = 2.0 * std::numbers::pi * (x_nm - section.wave_phase_nm) / wavelength;
-    return section.wave_amplitude_offset + section.wave_amplitude * ((std::sin(theta) + 1.0) * 0.5);
+    const Scalar spacing =
+        std::max(static_cast<Scalar>(1.0e-12), static_cast<Scalar>(section.section_spacing_nm));
+    const Scalar wavelength =
+        std::max(static_cast<Scalar>(1.0e-12), static_cast<Scalar>(section.wave_wavelength_nm));
+    const Scalar local_index =
+        static_cast<Scalar>(index >= section.start_index ? index - section.start_index : 0u);
+    const Scalar x_nm = local_index * spacing;
+    const Scalar theta = static_cast<Scalar>(2.0) * scalar_pi() *
+                         (x_nm - static_cast<Scalar>(section.wave_phase_nm)) / wavelength;
+    return static_cast<Scalar>(section.wave_amplitude_offset) +
+           static_cast<Scalar>(section.wave_amplitude) *
+               ((scalar_sin(theta) + static_cast<Scalar>(1.0)) * static_cast<Scalar>(0.5));
 }
 
 std::size_t owned_mask_size(std::size_t sample_count) { return (sample_count + 7u) / 8u; }
