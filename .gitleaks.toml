@@ -8,4 +8,5 @@ description = "Local documentation paths and generated report references"
 paths = [
   '''CODE_REVIEW\.md''',
   '''docs/.*''',
+  '''src/gui/vendor/.*''',
 ]

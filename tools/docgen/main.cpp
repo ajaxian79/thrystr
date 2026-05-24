@@ -341,10 +341,12 @@ std::vector<std::string> tokens_for(std::string_view text) {
 
 std::string site_shell(const std::vector<Page>& pages, const Page& current) {
     std::ostringstream out;
-    out << "<!doctype html><html><head><meta charset=\"utf-8\">"
-        << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        << "<title>" << escape_html(current.title) << " - thrystr</title>"
-        << "<link rel=\"stylesheet\" href=\"style.css\"></head><body><nav><strong>thrystr</strong>";
+    out << "<!doctype html><html><head><meta charset=\"utf-8\">";
+    out << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+    out << "<title>";
+    out << escape_html(current.title);
+    out << " - thrystr</title>";
+    out << "<link rel=\"stylesheet\" href=\"style.css\"></head><body><nav><strong>thrystr</strong>";
     for (const Page& page : pages) {
         out << "<a href=\"" << page.slug << ".html\""
             << (page.slug == current.slug ? " class=\"active\"" : "") << ">"

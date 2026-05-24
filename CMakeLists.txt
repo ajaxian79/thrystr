@@ -112,7 +112,7 @@ if(THRYSTR_BUILD_APP)
         thrystr_stb_image_write
         thrystr::glfw
         OpenGL::GL)
-    if(X11_FOUND)
+    if(UNIX AND NOT APPLE AND X11_FOUND)
         target_include_directories(thrystr PRIVATE ${X11_INCLUDE_DIR})
         target_link_libraries(thrystr PRIVATE ${X11_LIBRARIES})
         target_compile_definitions(thrystr PRIVATE THRYSTR_HAS_X11=1)
