@@ -45,6 +45,18 @@ target_compile_options(thrystr_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>)
 
+add_library(thrystr_app STATIC
+    src/app/workspace.cpp
+    src/app/fit_validation.cpp
+    src/app/convergent_fit.cpp)
+target_include_directories(thrystr_app PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_link_libraries(thrystr_app PUBLIC thrystr_core)
+target_compile_options(thrystr_app PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+
 if(THRYSTR_BUILD_APP)
     find_package(OpenGL REQUIRED)
     find_package(X11 QUIET)
@@ -95,6 +107,7 @@ if(THRYSTR_BUILD_APP)
         src/render_io.cpp)
     target_link_libraries(thrystr PRIVATE
         thrystr_core
+        thrystr_app
         skald::skald
         imgui_backends
         thrystr_stb_image_write
@@ -119,6 +132,11 @@ if(THRYSTR_BUILD_TESTS)
         tests/scalar_analysis_tests.cpp)
     target_link_libraries(thrystr_core_tests PRIVATE thrystr_core)
     add_test(NAME thrystr_core_tests COMMAND thrystr_core_tests)
+
+    add_executable(thrystr_app_tests
+        tests/app_model_tests.cpp)
+    target_link_libraries(thrystr_app_tests PRIVATE thrystr_app)
+    add_test(NAME thrystr_app_tests COMMAND thrystr_app_tests)
 endif()
 
 if(THRYSTR_BUILD_FUZZ)
