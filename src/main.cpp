@@ -17,6 +17,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <charconv>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -30,6 +33,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -56,9 +60,8 @@ constexpr double kDefaultPlaybackPointsPerSecond = 60.0;
 constexpr std::array<double, 4> kPlaybackSpeedPresets = {12.0, 24.0, 30.0, 60.0};
 constexpr float kPlayheadScrubHitPixels = 18.0f;
 constexpr float kTickerCurrentScale = 1.5f;
-constexpr float kPlaybackReadoutWidth = 320.0f;
-constexpr float kPlaybackReadoutHeight = 36.0f;
 constexpr std::size_t kTickerTargetLabelPixels = 58u;
+constexpr std::uint64_t kManualScrollAutoscrollInhibitFrames = 90u;
 constexpr std::size_t kWaveFitMaxSamples = 4096;
 constexpr int kWaveFitWavelengthSteps = 144;
 constexpr int kWaveFitPhaseSteps = 128;
@@ -206,6 +209,21 @@ struct ChromeCursors {
     GLFWcursor* nesw = nullptr;
 };
 
+bool parse_non_negative_int(std::string_view text, int& value) {
+    if (text.empty()) {
+        return false;
+    }
+    int parsed = 0;
+    const char* first = text.data();
+    const char* last = text.data() + text.size();
+    const std::from_chars_result result = std::from_chars(first, last, parsed);
+    if (result.ec != std::errc() || result.ptr != last || parsed < 0) {
+        return false;
+    }
+    value = parsed;
+    return true;
+}
+
 struct AppState {
     char path[4096] = {};
     char wave_path[4096] = {};
@@ -247,6 +265,10 @@ struct AppState {
     int lazy_block_mib = kDefaultLazyBlockMiB;
     std::vector<LazyBlock> lazy_blocks;
     std::uint64_t lazy_frame = 0;
+    std::ifstream lazy_source_stream;
+    std::filesystem::path lazy_source_stream_path;
+    std::uint64_t plot_frame = 0;
+    std::uint64_t last_manual_scroll_frame = 0;
     std::size_t playhead_index = 0;
     double playhead_fraction = 0.0;
     double playback_points_per_second = kDefaultPlaybackPointsPerSecond;
@@ -278,8 +300,14 @@ Args parse_args(int argc, char** argv) {
         };
         const auto next_int = [&](int& dst, const char* flag) {
             if (arg == flag && i + 1 < argc) {
-                dst = std::max(0, std::atoi(argv[++i]));
-                return true;
+                const std::string value = argv[++i];
+                if (parse_non_negative_int(value, dst)) {
+                    return true;
+                }
+                std::fprintf(stderr,
+                             "warning: ignoring invalid value for %s: %s\n",
+                             flag,
+                             value.c_str());
             }
             return false;
         };
@@ -331,6 +359,7 @@ void force_undecorated_window(GLFWwindow* window) {
         long input_mode;
         unsigned long status;
     };
+    static_assert(sizeof(MotifWmHints) == 5 * sizeof(unsigned long));
 
     constexpr unsigned long kDecorationsFlag = 1UL << 1;
     MotifWmHints hints{};
@@ -638,19 +667,23 @@ void update_chrome_action(AppState& state,
     int h = state.chrome_start_window_h;
 
     if (chrome_action_has_left(state.chrome_action)) {
+        const int right = state.chrome_start_window_x + state.chrome_start_window_w;
         w = state.chrome_start_window_w - dx;
         if (w < kMinWindowWidth) {
             w = kMinWindowWidth;
         }
+        x = right - w;
     } else if (chrome_action_has_right(state.chrome_action)) {
         w = std::max(kMinWindowWidth, state.chrome_start_window_w + dx);
     }
 
     if (chrome_action_has_top(state.chrome_action)) {
+        const int bottom = state.chrome_start_window_y + state.chrome_start_window_h;
         h = state.chrome_start_window_h - dy;
         if (h < kMinWindowHeight) {
             h = kMinWindowHeight;
         }
+        y = bottom - h;
     } else if (chrome_action_has_bottom(state.chrome_action)) {
         h = std::max(kMinWindowHeight, state.chrome_start_window_h + dy);
     }
@@ -660,19 +693,22 @@ void update_chrome_action(AppState& state,
         Display* display = glfwGetX11Display();
         const Window xwindow = glfwGetX11Window(window);
         if (display && xwindow != 0) {
-            XResizeWindow(display,
-                          xwindow,
-                          static_cast<unsigned int>(w),
-                          static_cast<unsigned int>(h));
+            XMoveResizeWindow(display,
+                              xwindow,
+                              x,
+                              y,
+                              static_cast<unsigned int>(w),
+                              static_cast<unsigned int>(h));
             XFlush(display);
             return;
         }
     }
 #endif
 
+    if (x != state.chrome_start_window_x || y != state.chrome_start_window_y) {
+        glfwSetWindowPos(window, x, y);
+    }
     glfwSetWindowSize(window, w, h);
-    (void)x;
-    (void)y;
 }
 
 void handle_custom_chrome(AppState& state,
@@ -872,6 +908,10 @@ std::size_t source_sample_count(const AppState& state) {
 void clear_lazy_cache(AppState& state) {
     state.lazy_blocks.clear();
     state.lazy_frame = 0;
+    if (state.lazy_source_stream.is_open()) {
+        state.lazy_source_stream.close();
+    }
+    state.lazy_source_stream_path.clear();
 }
 
 std::vector<std::uint8_t> read_file_slice(const std::filesystem::path& path,
@@ -892,6 +932,43 @@ std::vector<std::uint8_t> read_file_slice(const std::filesystem::path& path,
     }
     input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     const std::streamsize read_count = input.gcount();
+    if (read_count < 0) {
+        throw std::runtime_error("could not read file: " + path.string());
+    }
+    bytes.resize(static_cast<std::size_t>(read_count));
+    return bytes;
+}
+
+std::vector<std::uint8_t> read_lazy_file_slice(AppState& state,
+                                               const std::filesystem::path& path,
+                                               std::size_t offset,
+                                               std::size_t length) {
+    std::vector<std::uint8_t> bytes(length);
+    if (length == 0u) {
+        return bytes;
+    }
+
+    if (!state.lazy_source_stream.is_open() ||
+        state.lazy_source_stream_path != path) {
+        if (state.lazy_source_stream.is_open()) {
+            state.lazy_source_stream.close();
+        }
+        state.lazy_source_stream.clear();
+        state.lazy_source_stream.open(path, std::ios::binary);
+        state.lazy_source_stream_path = path;
+    }
+    if (!state.lazy_source_stream) {
+        throw std::runtime_error("could not open file: " + path.string());
+    }
+
+    state.lazy_source_stream.clear();
+    state.lazy_source_stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!state.lazy_source_stream) {
+        throw std::runtime_error("could not seek file: " + path.string());
+    }
+    state.lazy_source_stream.read(reinterpret_cast<char*>(bytes.data()),
+                                  static_cast<std::streamsize>(bytes.size()));
+    const std::streamsize read_count = state.lazy_source_stream.gcount();
     if (read_count < 0) {
         throw std::runtime_error("could not read file: " + path.string());
     }
@@ -949,7 +1026,7 @@ void load_lazy_block(AppState& state, std::size_t block_index) {
     LazyBlock block;
     block.index = block_index;
     block.offset = offset;
-    block.bytes = read_file_slice(state.analysis->source_path, offset, length);
+    block.bytes = read_lazy_file_slice(state, state.analysis->source_path, offset, length);
     block.mapped_bytes = thrystr::map_bytes_to_wrapped(block.bytes, state.mappers);
     block.last_used_frame = state.lazy_frame;
     state.lazy_blocks.push_back(std::move(block));
@@ -970,6 +1047,7 @@ void seed_lazy_cache_from_analysis(AppState& state) {
     block.mapped_bytes = state.analysis->mapped_bytes;
     block.last_used_frame = ++state.lazy_frame;
     state.lazy_blocks.push_back(std::move(block));
+    trim_lazy_cache(state);
 }
 
 void ensure_lazy_blocks(AppState& state, std::size_t first, std::size_t last) {
@@ -1180,7 +1258,6 @@ void clamp_segment(AppState& state) {
     if (count == 0u) {
         state.segment.selection_start = 0u;
         state.segment.selection_end = 0u;
-        state.segment.active = false;
         state.selection_drag_handle = 0;
         return;
     }
@@ -1670,6 +1747,13 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     const double sine_phase = read_binary<double>(input);
     const double cosine_phase = read_binary<double>(input);
 
+    state.entities.clear();
+    state.selected_entity_id = 0;
+    state.entity_name_id = 0;
+    state.next_entity_id = 1;
+    state.wave_serial = 1;
+    state.segment = {};
+
     const std::uint32_t mapper_count = read_binary<std::uint32_t>(input);
     if (mapper_count > kMaxWaveSettingsItems) {
         throw std::runtime_error("wave settings mapper count too large");
@@ -1689,7 +1773,6 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         if (entity_count > kMaxWaveSettingsItems) {
             throw std::runtime_error("wave settings entity count too large");
         }
-        state.entities.clear();
         state.entities.reserve(entity_count);
         int max_entity_id = 0;
         int wave_count = 0;
@@ -2808,9 +2891,17 @@ void toggle_xline_playback(AppState& state) {
 }
 
 void apply_custom_playback_speed(AppState& state) {
+    errno = 0;
     char* end = nullptr;
     const double value = std::strtod(state.custom_playback_speed_text, &end);
+    while (end && *end != '\0' &&
+           std::isspace(static_cast<unsigned char>(*end)) != 0) {
+        ++end;
+    }
     if (end != state.custom_playback_speed_text &&
+        end != nullptr &&
+        *end == '\0' &&
+        errno != ERANGE &&
         std::isfinite(value) &&
         value > 0.0) {
         state.playback_points_per_second = value;
@@ -2833,7 +2924,9 @@ bool playback_speed_button(const char* label, bool selected, float width = 42.0f
         ImGui::PushStyleColor(ImGuiCol_Text,
                               skald::tokens::to_vec4(skald::tokens::ink::primary));
     }
+    ImGui::PushID(label);
     const bool clicked = ImGui::Button(label, ImVec2(width, 0.0f));
+    ImGui::PopID();
     ImGui::PopStyleColor(3);
     return clicked;
 }
@@ -2992,7 +3085,20 @@ void draw_data_ticker(const AppState& state,
                   label.c_str());
 }
 
+float playback_readout_width(const AppState& state) {
+    const std::size_t max_index = source_sample_count(state) == 0u
+        ? 0u
+        : source_sample_count(state) - 1u;
+    const std::string longest_index = "x " + format_count(max_index);
+    const ImVec2 index_size = ImGui::CalcTextSize(longest_index.c_str());
+    const ImVec2 hex_size = ImGui::CalcTextSize("hex FF");
+    return std::max(124.0f,
+                    std::max(index_size.x, hex_size.x) +
+                        ImGui::GetStyle().FramePadding.x * 2.0f);
+}
+
 void draw_plot(AppState& state) {
+    ++state.plot_frame;
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     const float toolbox_width = state.workspace_open ? std::min(kToolboxWidth, viewport.x * 0.45f) : 0.0f;
     ImGui::SetNextWindowPos(ImVec2(0.0f, kTopChromeHeight));
@@ -3038,20 +3144,17 @@ void draw_plot(AppState& state) {
     const std::optional<std::uint8_t> playhead_byte =
         ticker_byte_at(state, state.playhead_index);
     const std::string playhead_hex = playhead_byte ? hex_byte_text(*playhead_byte) : "--";
+    const float readout_width = playback_readout_width(state);
     const float readout_x = ImGui::GetCursorPosX();
-    ImGui::BeginChild("##playback_readout",
-                      ImVec2(kPlaybackReadoutWidth, kPlaybackReadoutHeight),
-                      false,
-                      ImGuiWindowFlags_NoScrollbar |
-                      ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginGroup();
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
                        "x %s",
                        format_count(state.playhead_index).c_str());
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
                        "hex %s",
                        playhead_hex.c_str());
-    ImGui::EndChild();
-    ImGui::SameLine(readout_x + kPlaybackReadoutWidth);
+    ImGui::EndGroup();
+    ImGui::SameLine(readout_x + readout_width);
     if (playback_speed_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
                               state.wheel_scroll_mode,
                               102.0f)) {
@@ -3100,14 +3203,16 @@ void draw_plot(AppState& state) {
     const float child_width = ImGui::GetWindowWidth();
     const float max_scroll_x = std::max(0.0f, logical_width - child_width);
     const float native_scroll_x = ImGui::GetScrollX();
-    const bool native_scrollbar_drag =
+    const float scrollbar_height = ImGui::GetStyle().ScrollbarSize;
+    const bool scrollbar_drag_in_progress =
         child_mouse_inside &&
         io.MouseDown[ImGuiMouseButton_Left] &&
-        io.MousePos.y >= child_pos.y + child_size.y - ImGui::GetFrameHeightWithSpacing();
+        io.MousePos.y >= child_pos.y + child_size.y - scrollbar_height;
     state.timeline_scroll_x = std::clamp(state.timeline_scroll_x, 0.0f, max_scroll_x);
-    if (native_scrollbar_drag &&
+    if (scrollbar_drag_in_progress &&
         std::abs(native_scroll_x - state.timeline_scroll_x) > 0.5f) {
         state.timeline_scroll_x = std::clamp(native_scroll_x, 0.0f, max_scroll_x);
+        state.last_manual_scroll_frame = state.plot_frame;
     }
     if (state.pending_scroll_index) {
         const float target_scroll =
@@ -3117,7 +3222,11 @@ void draw_plot(AppState& state) {
         state.timeline_scroll_x = std::clamp(target_scroll, 0.0f, max_scroll_x);
         state.pending_scroll_index.reset();
     }
-    if (state.xline_playing) {
+    const bool manual_scroll_recent =
+        state.plot_frame >= state.last_manual_scroll_frame &&
+        state.plot_frame - state.last_manual_scroll_frame <=
+            kManualScrollAutoscrollInhibitFrames;
+    if (state.xline_playing && !manual_scroll_recent) {
         const float playhead_local =
             margin_left + static_cast<float>(state.playhead_index) * x_step;
         const float visible_midpoint = state.timeline_scroll_x + child_width * 0.5f;
@@ -3138,10 +3247,9 @@ void draw_plot(AppState& state) {
                            io.MouseWheel * scroll_step,
                        0.0f,
                        max_scroll_x);
+        state.last_manual_scroll_frame = state.plot_frame;
     }
-    ImGui::SetScrollX(state.timeline_scroll_x);
     ImGui::InvisibleButton("##plot_canvas", ImVec2(logical_width, plot_height));
-    ImGui::SetScrollX(state.timeline_scroll_x);
     const bool plot_hovered = ImGui::IsItemHovered();
 
     const ImVec2 item_min = ImGui::GetItemRectMin();
@@ -3164,7 +3272,7 @@ void draw_plot(AppState& state) {
                 std::clamp(state.timeline_scroll_x - io.MouseWheel * scroll_step,
                            0.0f,
                            max_scroll_x);
-            ImGui::SetScrollX(state.timeline_scroll_x);
+            state.last_manual_scroll_frame = state.plot_frame;
         } else if (!state.wheel_scroll_mode) {
             const float factor = std::pow(1.12f, io.MouseWheel);
             const float old_step = x_step;
@@ -3183,9 +3291,10 @@ void draw_plot(AppState& state) {
                 std::clamp(mouse_index * new_step + margin_left - mouse_local_x,
                            0.0f,
                            new_max_scroll_x);
-            ImGui::SetScrollX(state.timeline_scroll_x);
+            state.last_manual_scroll_frame = state.plot_frame;
         }
     }
+    ImGui::SetScrollX(state.timeline_scroll_x);
     const float visible_left_local = state.timeline_scroll_x;
     const float visible_width = child_width;
     const float index_left = std::max(0.0f, (visible_left_local - margin_left) / x_step);
@@ -3228,8 +3337,9 @@ void draw_plot(AppState& state) {
             state.playhead_dragging = false;
         }
     }
-    ensure_lazy_blocks(state, first, last);
-    ensure_lazy_blocks(state, state.playhead_index, state.playhead_index);
+    ensure_lazy_blocks(state,
+                       std::min(first, state.playhead_index),
+                       std::max(last, state.playhead_index));
 
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(clip_min, clip_max, true);
