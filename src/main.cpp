@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <thrystr/scalar_analysis.hpp>
+#include <thrystr/app/convergent_fit.hpp>
+#include <thrystr/app/fit_validation.hpp>
 #include <thrystr/render_io.hpp>
 
 #include <GLFW/glfw3.h>
@@ -72,9 +74,10 @@ constexpr const char* kSplashHeroPath = THRYSTR_ASSET_DIR "/splash_hero.png";
 constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
-constexpr std::uint32_t kWaveSettingsVersion = 2;
+constexpr std::uint32_t kWaveSettingsVersion = 3;
 constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
 constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
+constexpr std::size_t kAutoFitMaxSamples = 65536u;
 constexpr ImU32 kTransparent = IM_COL32(0, 0, 0, 0);
 
 const ImU32 kDataPointHi = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.92f);
@@ -232,6 +235,8 @@ struct AppState {
     std::string status = "Empty workspace";
     std::vector<thrystr::ValueMapper> mappers;
     std::vector<Entity> entities;
+    std::vector<thrystr::app::Section> fitted_sections;
+    thrystr::app::ValidationReport fit_validation;
     Segment segment;
     int next_entity_id = 1;
     int selected_entity_id = 0;
@@ -242,6 +247,8 @@ struct AppState {
     bool splash_open = true;
     bool show_settings = false;
     bool show_inspector_overlay = false;
+    bool show_reconstruction_only = false;
+    bool show_fit_validation = false;
     bool request_close = false;
     ChromeAction chrome_action = ChromeAction::None;
     double chrome_start_global_x = 0.0;
@@ -1314,6 +1321,8 @@ void open_empty_workspace(AppState& state) {
     state.splash_open = false;
     state.analysis.reset();
     state.entities.clear();
+    state.fitted_sections.clear();
+    state.fit_validation = {};
     state.segment = {};
     state.path[0] = '\0';
     state.selected_entity_id = 0;
@@ -1550,6 +1559,136 @@ void create_interpolated_wave(AppState& state) {
                    format_count(wave.wave.wavelength_modifiers.size()) + " wavelength keys";
 }
 
+std::vector<float> collect_scalars_for_range(AppState& state,
+                                              std::size_t first,
+                                              std::size_t last) {
+    std::vector<float> scalars;
+    const std::size_t count = source_sample_count(state);
+    if (!state.analysis || count == 0u || last < first) {
+        return scalars;
+    }
+    first = std::min(first, count - 1u);
+    last = std::min(last, count - 1u);
+    scalars.reserve(last - first + 1u);
+    const std::size_t block_size = lazy_block_bytes(state);
+    for (std::size_t block_first = first; block_first <= last;) {
+        const std::size_t block_last =
+            std::min(last, ((block_first / block_size) + 1u) * block_size - 1u);
+        ensure_lazy_blocks(state, block_first, block_last);
+        for (std::size_t index = block_first; index <= block_last; ++index) {
+            scalars.push_back(scalar_at(state, index).value_or(0.0f));
+        }
+        if (block_last == last) {
+            break;
+        }
+        block_first = block_last + 1u;
+    }
+    return scalars;
+}
+
+thrystr::app::ValidationReport validate_fitted_sections(AppState& state) {
+    thrystr::app::ValidationReport report;
+    if (!state.analysis || state.fitted_sections.empty()) {
+        report.pass = false;
+        report.issues.push_back({"no fitted sections to validate", 0, 0, 0});
+        return report;
+    }
+
+    std::vector<thrystr::app::Section> sorted = state.fitted_sections;
+    std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) {
+        return left.start_index < right.start_index;
+    });
+
+    std::uint64_t expected_start = sorted.front().start_index;
+    double residual_sum = 0.0;
+    std::size_t residual_count = 0;
+    for (std::size_t section_index = 0; section_index < sorted.size(); ++section_index) {
+        const thrystr::app::Section& section = sorted[section_index];
+        if (section.start_index != expected_start) {
+            report.pass = false;
+            report.issues.push_back(
+                {"fitted section coverage has a gap or overlap", 0, section_index,
+                 static_cast<std::size_t>(expected_start)});
+            expected_start = section.start_index;
+        }
+        if (section.length == 0u) {
+            report.pass = false;
+            report.issues.push_back({"fitted section has zero length", 0, section_index,
+                                     section.start_index});
+            continue;
+        }
+        const std::size_t section_last =
+            static_cast<std::size_t>(thrystr::app::section_end(section) - 1u);
+        ensure_lazy_blocks(state, section.start_index, section_last);
+        for (std::size_t index = section.start_index;
+             index < thrystr::app::section_end(section);
+             ++index) {
+            const std::optional<float> scalar = scalar_at(state, index);
+            if (!scalar) {
+                report.pass = false;
+                report.issues.push_back({"fitted section sample is not loaded", 0,
+                                         section_index, index});
+                continue;
+            }
+            const double residual =
+                std::abs(thrystr::app::wave_value_at_index(section, index) -
+                         static_cast<double>(*scalar));
+            report.max_residual = std::max(report.max_residual, residual);
+            residual_sum += residual;
+            ++residual_count;
+            if (residual > section.fit_tolerance) {
+                report.pass = false;
+                report.issues.push_back({"fitted section residual exceeds tolerance", 0,
+                                         section_index, index});
+            }
+        }
+        expected_start = thrystr::app::section_end(section);
+    }
+    report.checked_samples = residual_count;
+    report.mean_residual = residual_count == 0u
+        ? 0.0
+        : residual_sum / static_cast<double>(residual_count);
+    return report;
+}
+
+void auto_fit_current_range(AppState& state) {
+    if (!state.analysis || source_sample_count(state) == 0u) {
+        state.status = "Load source data before auto-fit";
+        return;
+    }
+
+    const auto [first, requested_last] = analysis_selection_bounds(state);
+    const std::size_t capped_last =
+        std::min(requested_last, first + kAutoFitMaxSamples - 1u);
+    std::vector<float> scalars = collect_scalars_for_range(state, first, capped_last);
+    if (scalars.empty()) {
+        state.status = "No scalar samples available for auto-fit";
+        return;
+    }
+
+    thrystr::app::ConvergentFitOptions options;
+    options.tolerance = std::max(1.0e-9, static_cast<double>(state.wave_tolerance));
+    options.default_spacing_nm = data_spatial_period_nm(state);
+    options.max_section_length = std::min<std::size_t>(4096u, scalars.size());
+    const thrystr::app::ConvergentFitResult fit =
+        thrystr::app::fit_convergent_sections(scalars, options);
+
+    state.fitted_sections = fit.sections;
+    for (thrystr::app::Section& section : state.fitted_sections) {
+        section.start_index += static_cast<std::uint32_t>(first);
+    }
+    state.fit_validation = validate_fitted_sections(state);
+    state.show_reconstruction_only = true;
+    state.status = "Auto-fit: " + format_count(state.fitted_sections.size()) +
+                   " sections, " +
+                   format_count(state.fit_validation.checked_samples) +
+                   " samples, max residual " +
+                   std::to_string(state.fit_validation.max_residual);
+    if (requested_last != capped_last) {
+        state.status += " (range capped)";
+    }
+}
+
 void load_path(AppState& state);
 
 bool should_defer_phase_fit_on_load(const std::filesystem::path& path) {
@@ -1711,6 +1850,21 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
     write_binary(output, static_cast<std::uint64_t>(state.segment.selection_end));
     write_string(output, state.path);
 
+    const auto section_count = static_cast<std::uint32_t>(state.fitted_sections.size());
+    write_binary(output, section_count);
+    for (const thrystr::app::Section& section : state.fitted_sections) {
+        write_binary(output, section.start_index);
+        write_binary(output, section.length);
+        write_binary(output, section.section_spacing_nm);
+        write_binary(output, section.wave_wavelength_nm);
+        write_binary(output, section.wave_amplitude);
+        write_binary(output, section.wave_amplitude_offset);
+        write_binary(output, section.wave_phase_nm);
+        write_binary(output, section.fit_tolerance);
+        write_binary(output, section.max_residual);
+        write_binary(output, section.mean_residual);
+    }
+
     copy_to_buffer(state.wave_path, output_path.lexically_normal().string());
     state.status = "Saved wave settings: " + output_path.filename().string();
 }
@@ -1729,7 +1883,7 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     }
 
     const std::uint32_t version = read_binary<std::uint32_t>(input);
-    if (version != 1 && version != kWaveSettingsVersion) {
+    if (version != 1 && version != 2 && version != kWaveSettingsVersion) {
         throw std::runtime_error("unsupported wave settings version");
     }
 
@@ -1753,6 +1907,8 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     state.next_entity_id = 1;
     state.wave_serial = 1;
     state.segment = {};
+    state.fitted_sections.clear();
+    state.fit_validation = {};
 
     const std::uint32_t mapper_count = read_binary<std::uint32_t>(input);
     if (mapper_count > kMaxWaveSettingsItems) {
@@ -1815,6 +1971,28 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         const std::string source_path = read_string(input);
         if (!source_path.empty()) {
             copy_to_buffer(state.path, source_path);
+        }
+        if (version >= 3) {
+            const std::uint32_t section_count = read_binary<std::uint32_t>(input);
+            if (section_count > kMaxWaveSettingsItems) {
+                throw std::runtime_error("wave settings section count too large");
+            }
+            state.fitted_sections.reserve(section_count);
+            for (std::uint32_t section_index = 0; section_index < section_count;
+                 ++section_index) {
+                thrystr::app::Section section;
+                section.start_index = read_binary<std::uint32_t>(input);
+                section.length = read_binary<std::uint32_t>(input);
+                section.section_spacing_nm = read_binary<double>(input);
+                section.wave_wavelength_nm = read_binary<double>(input);
+                section.wave_amplitude = read_binary<double>(input);
+                section.wave_amplitude_offset = read_binary<double>(input);
+                section.wave_phase_nm = read_binary<double>(input);
+                section.fit_tolerance = read_binary<double>(input);
+                section.max_residual = read_binary<double>(input);
+                section.mean_residual = read_binary<double>(input);
+                state.fitted_sections.push_back(section);
+            }
         }
         if (!find_entity(state, state.selected_entity_id) && !state.entities.empty()) {
             state.selected_entity_id = state.entities.front().id;
@@ -2445,6 +2623,8 @@ void draw_settings_dialog(AppState& state) {
         skald::PillToggle("Data points", &state.show_points);
         ImGui::SameLine();
         skald::PillToggle("Data lines", &state.show_lines);
+        ImGui::SameLine();
+        skald::PillToggle("Reconstruction", &state.show_reconstruction_only);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         double zoom_x = static_cast<double>(state.zoom_x);
         double zoom_y = static_cast<double>(state.zoom_y);
@@ -2466,6 +2646,81 @@ void draw_settings_dialog(AppState& state) {
     if (!open) {
         state.show_settings = false;
     }
+}
+
+void draw_fit_validation_overlay(AppState& state) {
+    if (!state.show_fit_validation) {
+        return;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(680.0f, 420.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Fit Validation",
+                      &state.show_fit_validation,
+                      ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
+
+    const thrystr::app::ValidationReport& report = state.fit_validation;
+    skald::KvRowStatus("coverage",
+                       report.pass ? "PASS" : "FAIL",
+                       report.pass ? skald::BadgeTone::Success
+                                   : skald::BadgeTone::Destructive);
+    skald::KvRow("sections", "%s", format_count(state.fitted_sections.size()).c_str());
+    skald::KvRow("samples", "%s", format_count(report.checked_samples).c_str());
+    skald::KvRow("max residual", "%.8f", report.max_residual);
+    skald::KvRow("mean residual", "%.8f", report.mean_residual);
+
+    if (ImGui::BeginTable("##fit_validation_sections", 6,
+                          ImGuiTableFlags_BordersInnerH |
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_SizingStretchProp |
+                          ImGuiTableFlags_ScrollY,
+                          ImVec2(0.0f, 190.0f))) {
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 44.0f);
+        ImGui::TableSetupColumn("start", ImGuiTableColumnFlags_WidthFixed, 88.0f);
+        ImGui::TableSetupColumn("length", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+        ImGui::TableSetupColumn("spacing", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+        ImGui::TableSetupColumn("lambda", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+        ImGui::TableSetupColumn("residual", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (std::size_t i = 0; i < state.fitted_sections.size(); ++i) {
+            const thrystr::app::Section& section = state.fitted_sections[i];
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("%zu", i + 1u);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%u", section.start_index);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%u", section.length);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%.4f", section.section_spacing_nm);
+            ImGui::TableSetColumnIndex(4);
+            ImGui::Text("%.4f", section.wave_wavelength_nm);
+            ImGui::TableSetColumnIndex(5);
+            ImGui::TextColored(
+                skald::tokens::to_vec4(section.max_residual > section.fit_tolerance
+                                            ? skald::tokens::status::destructive
+                                            : skald::tokens::ink::primary),
+                "%.8f",
+                section.max_residual);
+        }
+        ImGui::EndTable();
+    }
+
+    if (!report.issues.empty()) {
+        skald::SectionHeader("Issues");
+        if (ImGui::BeginChild("##fit_validation_issues", ImVec2(0.0f, 100.0f), false)) {
+            for (const thrystr::app::ValidationIssue& issue : report.issues) {
+                ImGui::TextWrapped("%s @ sample %zu",
+                                   issue.message.c_str(),
+                                   issue.sample_index);
+            }
+        }
+        ImGui::EndChild();
+    }
+
+    ImGui::End();
 }
 
 StartupAction draw_splash(AppState& state) {
@@ -2656,6 +2911,24 @@ void draw_entity_toolbox(AppState& state) {
                              static_cast<double>(last - first) * period);
                 if (skald::GhostButton("Select All", ImVec2(104.0f, 0.0f))) {
                     create_section(state);
+                }
+                ImGui::SameLine();
+                if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
+                    auto_fit_current_range(state);
+                }
+                if (!state.fitted_sections.empty()) {
+                    skald::KvRow("fit sections", "%s",
+                                 format_count(state.fitted_sections.size()).c_str());
+                    skald::KvRow("fit samples", "%s",
+                                 format_count(state.fit_validation.checked_samples).c_str());
+                    skald::KvRow("fit residual", "%.6f",
+                                 state.fit_validation.max_residual);
+                    if (skald::GhostButton("Validate Fit", ImVec2(118.0f, 0.0f))) {
+                        state.fit_validation = validate_fitted_sections(state);
+                        state.show_fit_validation = true;
+                    }
+                    ImGui::SameLine();
+                    skald::PillToggle("Reconstruction", &state.show_reconstruction_only);
                 }
             }
         } else {
@@ -3085,6 +3358,70 @@ void draw_data_ticker(const AppState& state,
                   label.c_str());
 }
 
+void draw_fitted_sections(ImDrawList* draw,
+                          const AppState& state,
+                          std::size_t first,
+                          std::size_t last,
+                          float plot_left,
+                          float plot_top,
+                          float plot_bottom,
+                          float x_step,
+                          float y_zoom) {
+    if (!draw || state.fitted_sections.empty() || last < first) {
+        return;
+    }
+
+    for (std::size_t section_index = 0;
+         section_index < state.fitted_sections.size();
+         ++section_index) {
+        const thrystr::app::Section& section = state.fitted_sections[section_index];
+        if (section.length == 0u) {
+            continue;
+        }
+        const std::size_t section_first = section.start_index;
+        const std::size_t section_last =
+            static_cast<std::size_t>(thrystr::app::section_end(section) - 1u);
+        if (section_last < first || section_first > last) {
+            continue;
+        }
+
+        const std::size_t visible_first = std::max(first, section_first);
+        const std::size_t visible_last = std::min(last, section_last);
+        const ImU32 base_color = kWaveColors[section_index % kWaveColors.size()];
+        const ImU32 fill = skald::tokens::with_alpha(base_color, 34.0f / 255.0f);
+        const ImU32 edge = section.max_residual > section.fit_tolerance
+            ? skald::tokens::status::destructive
+            : skald::tokens::with_alpha(base_color, 0.88f);
+        const float x0 = plot_left + static_cast<float>(section_first) * x_step;
+        const float x1 = plot_left + static_cast<float>(section_last) * x_step;
+        draw->AddRectFilled(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), fill);
+        draw->AddRect(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), edge, 0.0f, 0, 1.2f);
+
+        const std::size_t samples =
+            std::min<std::size_t>(1024u, visible_last - visible_first + 1u);
+        ImVec2 previous{};
+        bool has_previous = false;
+        for (std::size_t sample = 0; sample < samples; ++sample) {
+            const double t = samples > 1u
+                ? static_cast<double>(sample) / static_cast<double>(samples - 1u)
+                : 0.0;
+            const double index = static_cast<double>(visible_first) +
+                                 t * static_cast<double>(visible_last - visible_first);
+            const double value = thrystr::app::wave_value_at_index(
+                section,
+                static_cast<std::size_t>(std::llround(index)));
+            const ImVec2 point(plot_left + static_cast<float>(index) * x_step,
+                               y_for_value(static_cast<float>(value), plot_top,
+                                           plot_bottom, y_zoom));
+            if (has_previous) {
+                draw->AddLine(previous, point, edge, 1.4f);
+            }
+            previous = point;
+            has_previous = true;
+        }
+    }
+}
+
 float playback_readout_width(const AppState& state) {
     const std::size_t max_index = source_sample_count(state) == 0u
         ? 0u
@@ -3441,7 +3778,7 @@ void draw_plot(AppState& state) {
 
     const Entity* data = data_entity(state);
     const bool draw_data = data == nullptr || data->visible;
-    if (draw_data && state.show_lines) {
+    if (draw_data && state.show_lines && !state.show_reconstruction_only) {
         for (std::size_t i = first; i < last && i + 1 < count; ++i) {
             const std::optional<float> scalar_a = scalar_at(state, i);
             const std::optional<float> scalar_b = scalar_at(state, i + 1u);
@@ -3484,7 +3821,17 @@ void draw_plot(AppState& state) {
         }
     }
 
-    if (draw_data && state.show_points) {
+    draw_fitted_sections(draw,
+                         state,
+                         first,
+                         last,
+                         plot_left,
+                         plot_top,
+                         plot_bottom,
+                         x_step,
+                         y_zoom);
+
+    if (draw_data && state.show_points && !state.show_reconstruction_only) {
         draw_data_point_markers(draw,
                                 state,
                                 first,
@@ -3506,6 +3853,17 @@ void draw_plot(AppState& state) {
                   kDataLineColor, "data");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 108.0f, child_pos.y + 8.0f),
                   kWaveColors[0], "waves");
+    if (state.show_reconstruction_only) {
+        draw->AddRectFilled(ImVec2(child_pos.x + margin_left, child_pos.y + 28.0f),
+                            ImVec2(child_pos.x + margin_left + 118.0f,
+                                   child_pos.y + 52.0f),
+                            skald::tokens::with_alpha(skald::tokens::status::warning,
+                                                      48.0f / 255.0f),
+                            skald::tokens::radii::pill);
+        draw->AddText(ImVec2(child_pos.x + margin_left + 12.0f, child_pos.y + 33.0f),
+                      skald::tokens::status::warning,
+                      "reconstruction");
+    }
 
     if (state.playhead_index >= first && state.playhead_index <= last) {
         const float playhead_x = plot_left + static_cast<float>(state.playhead_index) * x_step;
@@ -3637,6 +3995,9 @@ void draw_file_dialog(AppState& state) {
         switch (state.active_dialog) {
         case DialogPurpose::OpenSource:
             copy_to_buffer(state.path, selected.lexically_normal().string());
+            state.fitted_sections.clear();
+            state.fit_validation = {};
+            state.show_reconstruction_only = false;
             load_path(state);
             break;
         case DialogPurpose::LoadWave:
@@ -3673,7 +4034,8 @@ void handle_shortcuts(AppState& state) {
         }
     }
     const bool shortcut = io.KeyCtrl || io.KeySuper;
-    if (shortcut && ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+    if (shortcut && (ImGui::IsKeyPressed(ImGuiKey_W, false) ||
+                     ImGui::IsKeyPressed(ImGuiKey_A, false))) {
         create_wave_entity(state);
     }
     if (shortcut && ImGui::IsKeyPressed(ImGuiKey_N, false)) {
@@ -3688,6 +4050,7 @@ void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors)
     draw_entity_toolbox(state);
     draw_inspector_overlay(state);
     draw_settings_dialog(state);
+    draw_fit_validation_overlay(state);
     draw_file_dialog(state);
     handle_custom_chrome(state, window, cursors);
 }
