@@ -178,7 +178,7 @@ struct LazyBlock {
 };
 
 struct AutoFitJob {
-    std::jthread worker;
+    std::thread worker;
     std::atomic<bool> running{false};
     std::atomic<bool> done{false};
     std::atomic<bool> cancel_requested{false};
@@ -1838,10 +1838,10 @@ void auto_fit_current_range(AppState& state, bool multi_track = false) {
     state.status = std::string(multi_track ? "Track auto-fit running on "
                                            : "Auto-fit running on ") +
                    format_count(scalars.size()) + " samples";
-    job.worker = std::jthread([&job,
-                               samples = std::move(scalars),
-                               multi_track,
-                               options]() mutable {
+    job.worker = std::thread([&job,
+                              samples = std::move(scalars),
+                              multi_track,
+                              options]() mutable {
         try {
             if (multi_track) {
                 thrystr::app::MultiTrackOptions track_options;
