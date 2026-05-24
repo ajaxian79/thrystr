@@ -1,5 +1,10 @@
 # thrystr
 
+Thrystr is available for personal, educational, research, and other
+non-commercial use under the Personal & Public License in `LICENSE`.
+Commercial use requires a paid commercial license; contact
+hello@blaketullysmith.com.
+
 Thrystr is a C++20 Skald/OpenGL/ImGui desktop tool for exploring byte streams as scalar waveforms.
 
 The first target view loads a binary file, finds the sliding 1 MiB window with the largest adjacent-byte delta, maps the bytes into the range `[-1, 1)`, scales X so consecutive slopes stay under a target threshold, and renders the sample with sine/cosine comparison waves.

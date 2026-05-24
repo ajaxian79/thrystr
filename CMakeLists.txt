@@ -7,6 +7,7 @@ project(thrystr
 
 option(THRYSTR_BUILD_APP "Build the OpenGL/ImGui application" ON)
 option(THRYSTR_BUILD_TESTS "Build unit tests" ON)
+option(THRYSTR_BUILD_FUZZ "Build libFuzzer targets" OFF)
 set(THRYSTR_SKALD_SOURCE_DIR "" CACHE PATH "Optional local Skald checkout")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -118,4 +119,16 @@ if(THRYSTR_BUILD_TESTS)
         tests/scalar_analysis_tests.cpp)
     target_link_libraries(thrystr_core_tests PRIVATE thrystr_core)
     add_test(NAME thrystr_core_tests COMMAND thrystr_core_tests)
+endif()
+
+if(THRYSTR_BUILD_FUZZ)
+    add_executable(thrystr_wave_settings_fuzz
+        tests/fuzz/fuzz_wave_settings.cpp)
+    target_compile_features(thrystr_wave_settings_fuzz PRIVATE cxx_std_20)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(thrystr_wave_settings_fuzz PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+        target_link_options(thrystr_wave_settings_fuzz PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+    endif()
 endif()

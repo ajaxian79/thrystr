@@ -1,0 +1,19 @@
+thrystr assembled license expression:
+
+SPDX-License-Identifier: LicenseRef-thrystr-dual AND MIT AND Zlib AND (Unlicense OR MIT)
+
+LicenseRef-thrystr-dual
+    First-party thrystr source code. See LICENSE.
+
+Dear ImGui - https://github.com/ocornut/imgui - MIT
+    Vendored path pending. Preserve upstream LICENSE.txt when vendored.
+
+skald - https://github.com/ajaxian79/skald - MIT
+    Vendored path pending. Preserve upstream LICENSE when vendored.
+
+GLFW - https://www.glfw.org/ - zlib/libpng license
+    Vendored path pending. Preserve upstream LICENSE.md when vendored.
+
+stb_image_write - https://github.com/nothings/stb - public domain / MIT
+    Vendored at third_party/stb in the current tree; moves under src/gui/vendor/stb
+    during the single-branch remediation.
