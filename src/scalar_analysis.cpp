@@ -6,6 +6,7 @@
 #include <deque>
 #include <fstream>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <system_error>
 #if defined(__unix__)
@@ -17,7 +18,6 @@
 namespace thrystr {
 namespace {
 
-constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr std::size_t kScanChunkBytes = 8u * 1024u * 1024u;
 
 struct WindowScanResult {
@@ -507,13 +507,13 @@ PhaseFit fit_wave_phase(std::span<const float> scalars,
         : 1.0;
 
     for (int step = 0; step < phase_steps; ++step) {
-        const double phase = (2.0 * kPi * static_cast<double>(step)) /
+        const double phase = (2.0 * std::numbers::pi * static_cast<double>(step)) /
                              static_cast<double>(phase_steps);
         std::size_t hits = 0;
         std::size_t tested = 0;
 
         for (std::size_t i = 0; i < scalars.size(); i += stride) {
-            const double theta = (2.0 * kPi * wave_scale *
+            const double theta = (2.0 * std::numbers::pi * wave_scale *
                                   static_cast<double>(i) / denom) + phase;
             const double wave = cosine ? std::cos(theta) : std::sin(theta);
             if (std::abs(wave - static_cast<double>(scalars[i])) <= tolerance) {

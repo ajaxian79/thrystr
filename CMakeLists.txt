@@ -29,7 +29,7 @@ else()
     set(SKALD_BUILD_TEMPLATE OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(skald
         GIT_REPOSITORY https://github.com/ajaxian79/skald.git
-        GIT_TAG        main
+        GIT_TAG        73e0887af857b8a9d6c84ffd0fd5119c5e166ec3
         GIT_SHALLOW    TRUE)
     FetchContent_MakeAvailable(skald)
     set(THRYSTR_SKALD_FONT_DIR "${skald_SOURCE_DIR}/fonts")
@@ -84,12 +84,14 @@ if(THRYSTR_BUILD_APP)
     endif()
 
     add_library(thrystr_stb_image_write STATIC
+        third_party/stb/stb_image_impl.cpp
         third_party/stb/stb_image_write_impl.cpp)
     target_include_directories(thrystr_stb_image_write PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
 
     add_executable(thrystr
-        src/main.cpp)
+        src/main.cpp
+        src/render_io.cpp)
     target_link_libraries(thrystr PRIVATE
         thrystr_core
         skald::skald
@@ -103,7 +105,8 @@ if(THRYSTR_BUILD_APP)
         target_compile_definitions(thrystr PRIVATE THRYSTR_HAS_X11=1)
     endif()
     target_compile_definitions(thrystr PRIVATE
-        THRYSTR_SKALD_FONT_DIR="${THRYSTR_SKALD_FONT_DIR}")
+        THRYSTR_SKALD_FONT_DIR="${THRYSTR_SKALD_FONT_DIR}"
+        THRYSTR_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
     target_compile_options(thrystr PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>)
