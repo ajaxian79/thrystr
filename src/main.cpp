@@ -428,8 +428,37 @@ void update_chrome_action(AppState& state,
         h = std::max(kMinWindowHeight, state.chrome_start_window_h + dy);
     }
 
-    glfwSetWindowPos(window, x, y);
+    const bool position_changed = x != state.chrome_start_window_x ||
+                                  y != state.chrome_start_window_y;
+
+#if defined(THRYSTR_HAS_X11)
+    if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
+        Display* display = glfwGetX11Display();
+        const Window xwindow = glfwGetX11Window(window);
+        if (display && xwindow != 0) {
+            if (position_changed) {
+                XMoveResizeWindow(display,
+                                  xwindow,
+                                  x,
+                                  y,
+                                  static_cast<unsigned int>(w),
+                                  static_cast<unsigned int>(h));
+            } else {
+                XResizeWindow(display,
+                              xwindow,
+                              static_cast<unsigned int>(w),
+                              static_cast<unsigned int>(h));
+            }
+            XFlush(display);
+            return;
+        }
+    }
+#endif
+
     glfwSetWindowSize(window, w, h);
+    if (position_changed) {
+        glfwSetWindowPos(window, x, y);
+    }
 }
 
 void handle_custom_chrome(AppState& state,
@@ -1887,11 +1916,11 @@ float plot_x_step(const AppState& state) {
     if (!state.analysis) {
         return 1.0f;
     }
-    const float slope_step = std::max(0.05f, state.analysis->x_scale);
+    const float slope_scale = std::max(1.0f, state.analysis->x_scale);
     const float point_spacing =
         static_cast<float>(std::clamp(data_spatial_period_nm(state), 0.000001, 1.0e6));
     const float zoom = std::max(0.01f, std::abs(state.zoom_x));
-    return std::max(0.05f, std::max(slope_step, point_spacing) * zoom);
+    return std::max(0.05f, point_spacing * slope_scale * zoom);
 }
 
 void draw_plot(AppState& state) {
@@ -1956,10 +1985,16 @@ void draw_plot(AppState& state) {
     const float plot_bottom = item_max.y - margin_bottom;
     if (plot_hovered && ImGui::GetIO().MouseWheel != 0.0f) {
         ImGuiIO& io = ImGui::GetIO();
-        const float factor = std::pow(1.12f, io.MouseWheel);
-        if (io.KeyCtrl || io.KeySuper) {
+        if (io.KeyShift) {
+            const float scroll_step =
+                std::clamp(ImGui::GetWindowWidth() * 0.18f, 64.0f, 420.0f);
+            ImGui::SetScrollX(std::max(0.0f,
+                                       ImGui::GetScrollX() - io.MouseWheel * scroll_step));
+        } else if (io.KeyCtrl || io.KeySuper) {
+            const float factor = std::pow(1.12f, io.MouseWheel);
             state.zoom_y = std::max(0.01f, state.zoom_y * factor);
         } else {
+            const float factor = std::pow(1.12f, io.MouseWheel);
             const float old_step = x_step;
             const float mouse_index = std::clamp(
                 (io.MousePos.x - plot_left) / old_step,
