@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <charconv>
 #include <cctype>
@@ -27,6 +28,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -74,7 +76,8 @@ constexpr const char* kSplashHeroPath = THRYSTR_ASSET_DIR "/splash_hero.png";
 constexpr const char* kFileDialogStableId = "###thrystr_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
 constexpr std::array<char, 8> kWaveSettingsMagic = {'T', 'H', 'R', 'Y', 'W', 'A', 'V', 'E'};
-constexpr std::uint32_t kWaveSettingsVersion = 3;
+constexpr std::uint32_t kWaveSettingsVersion = 4;
+constexpr std::uint32_t kWaveSettingsEndianStamp = 0x01020304u;
 constexpr std::uint32_t kMaxWaveSettingsStringBytes = 1u * 1024u * 1024u;
 constexpr std::uint32_t kMaxWaveSettingsItems = 10000u;
 constexpr std::size_t kAutoFitMaxSamples = 65536u;
@@ -1164,17 +1167,65 @@ T read_binary(std::istream& input) {
     return value;
 }
 
-void write_string(std::ostream& output, const std::string& value) {
+template <typename T>
+void write_binary_le(std::ostream& output, const T& value) {
+    std::array<unsigned char, sizeof(T)> bytes{};
+    std::memcpy(bytes.data(), &value, sizeof(T));
+    if constexpr (std::endian::native == std::endian::big) {
+        std::reverse(bytes.begin(), bytes.end());
+    }
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    if (!output) {
+        throw std::runtime_error("could not write wave settings");
+    }
+}
+
+template <typename T>
+T read_binary_le(std::istream& input) {
+    std::array<unsigned char, sizeof(T)> bytes{};
+    input.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    if (!input) {
+        throw std::runtime_error("could not read wave settings");
+    }
+    if constexpr (std::endian::native == std::endian::big) {
+        std::reverse(bytes.begin(), bytes.end());
+    }
+    T value{};
+    std::memcpy(&value, bytes.data(), sizeof(T));
+    return value;
+}
+
+std::string read_string(std::istream& input) {
+    const std::uint32_t length = read_binary<std::uint32_t>(input);
+    if (length > kMaxWaveSettingsStringBytes) {
+        throw std::runtime_error("wave settings string too large");
+    }
+    std::string value(length, '\0');
+    if (length > 0) {
+        input.read(value.data(), static_cast<std::streamsize>(length));
+    }
+    if (!input) {
+        throw std::runtime_error("could not read wave settings string");
+    }
+    return value;
+}
+
+void write_string_le(std::ostream& output, const std::string& value) {
+    if (value.size() > kMaxWaveSettingsStringBytes) {
+        throw std::runtime_error("wave settings string too large");
+    }
     const auto length = static_cast<std::uint32_t>(value.size());
-    write_binary(output, length);
+    write_binary_le(output, length);
     output.write(value.data(), static_cast<std::streamsize>(length));
     if (!output) {
         throw std::runtime_error("could not write wave settings string");
     }
 }
 
-std::string read_string(std::istream& input) {
-    const std::uint32_t length = read_binary<std::uint32_t>(input);
+std::string read_string_le(std::istream& input) {
+    const std::uint32_t length = read_binary_le<std::uint32_t>(input);
     if (length > kMaxWaveSettingsStringBytes) {
         throw std::runtime_error("wave settings string too large");
     }
@@ -1792,77 +1843,81 @@ void save_wave_settings(AppState& state, const std::filesystem::path& path) {
 
     output.write(kWaveSettingsMagic.data(),
                  static_cast<std::streamsize>(kWaveSettingsMagic.size()));
-    write_binary(output, kWaveSettingsVersion);
-    write_binary(output, state.max_slope);
-    write_binary(output, state.wave_scale);
-    write_binary(output, state.wave_tolerance);
-    write_binary(output, state.phase_steps);
-    write_binary(output, state.phase_test_points);
-    write_binary(output, state.zoom_x);
-    write_binary(output, state.zoom_y);
+    const auto write_value = [&]<typename T>(const T& value) {
+        write_binary_le(output, value);
+    };
+    write_value(kWaveSettingsVersion);
+    write_value(kWaveSettingsEndianStamp);
+    write_value(state.max_slope);
+    write_value(state.wave_scale);
+    write_value(state.wave_tolerance);
+    write_value(state.phase_steps);
+    write_value(state.phase_test_points);
+    write_value(state.zoom_x);
+    write_value(state.zoom_y);
 
     const std::uint8_t show_points = state.show_points ? 1 : 0;
     const std::uint8_t show_lines = state.show_lines ? 1 : 0;
     constexpr std::uint8_t reserved_byte = 1;
-    write_binary(output, show_points);
-    write_binary(output, show_lines);
-    write_binary(output, reserved_byte);
-    write_binary(output, reserved_byte);
+    write_value(show_points);
+    write_value(show_lines);
+    write_value(reserved_byte);
+    write_value(reserved_byte);
 
     const double sine_phase = state.analysis ? state.analysis->sine.phase_radians : 0.0;
     const double cosine_phase = state.analysis ? state.analysis->cosine.phase_radians : 0.0;
-    write_binary(output, sine_phase);
-    write_binary(output, cosine_phase);
+    write_value(sine_phase);
+    write_value(cosine_phase);
 
     const auto mapper_count = static_cast<std::uint32_t>(state.mappers.size());
-    write_binary(output, mapper_count);
+    write_value(mapper_count);
     for (const thrystr::ValueMapper& mapper : state.mappers) {
         const auto kind = static_cast<std::uint32_t>(mapper.kind);
         const std::uint8_t enabled = mapper.enabled ? 1 : 0;
-        write_binary(output, kind);
-        write_binary(output, mapper.operand);
-        write_binary(output, enabled);
+        write_value(kind);
+        write_value(mapper.operand);
+        write_value(enabled);
     }
 
     const auto entity_count = static_cast<std::uint32_t>(state.entities.size());
-    write_binary(output, entity_count);
+    write_value(entity_count);
     for (const Entity& entity : state.entities) {
-        write_binary(output, static_cast<std::int32_t>(entity.id));
-        write_binary(output, static_cast<std::uint32_t>(entity.type));
-        write_binary(output, static_cast<std::uint8_t>(entity.visible ? 1 : 0));
-        write_string(output, entity.name);
-        write_binary(output, entity.data.spatial_period_nm);
-        write_binary(output, entity.wave.wavelength_nm);
-        write_binary(output, entity.wave.amplitude);
-        write_binary(output, entity.wave.amplitude_offset);
-        write_binary(output, entity.wave.phase_nm);
+        write_value(static_cast<std::int32_t>(entity.id));
+        write_value(static_cast<std::uint32_t>(entity.type));
+        write_value(static_cast<std::uint8_t>(entity.visible ? 1 : 0));
+        write_string_le(output, entity.name);
+        write_value(entity.data.spatial_period_nm);
+        write_value(entity.wave.wavelength_nm);
+        write_value(entity.wave.amplitude);
+        write_value(entity.wave.amplitude_offset);
+        write_value(entity.wave.phase_nm);
         const auto modifier_count =
             static_cast<std::uint32_t>(entity.wave.wavelength_modifiers.size());
-        write_binary(output, modifier_count);
+        write_value(modifier_count);
         for (const auto& modifier : entity.wave.wavelength_modifiers) {
-            write_binary(output, modifier.first);
-            write_binary(output, modifier.second);
+            write_value(modifier.first);
+            write_value(modifier.second);
         }
     }
-    write_binary(output, static_cast<std::int32_t>(state.selected_entity_id));
-    write_binary(output, static_cast<std::uint8_t>(state.segment.active ? 1 : 0));
-    write_binary(output, static_cast<std::uint64_t>(state.segment.selection_start));
-    write_binary(output, static_cast<std::uint64_t>(state.segment.selection_end));
-    write_string(output, state.path);
+    write_value(static_cast<std::int32_t>(state.selected_entity_id));
+    write_value(static_cast<std::uint8_t>(state.segment.active ? 1 : 0));
+    write_value(static_cast<std::uint64_t>(state.segment.selection_start));
+    write_value(static_cast<std::uint64_t>(state.segment.selection_end));
+    write_string_le(output, state.path);
 
     const auto section_count = static_cast<std::uint32_t>(state.fitted_sections.size());
-    write_binary(output, section_count);
+    write_value(section_count);
     for (const thrystr::app::Section& section : state.fitted_sections) {
-        write_binary(output, section.start_index);
-        write_binary(output, section.length);
-        write_binary(output, section.section_spacing_nm);
-        write_binary(output, section.wave_wavelength_nm);
-        write_binary(output, section.wave_amplitude);
-        write_binary(output, section.wave_amplitude_offset);
-        write_binary(output, section.wave_phase_nm);
-        write_binary(output, section.fit_tolerance);
-        write_binary(output, section.max_residual);
-        write_binary(output, section.mean_residual);
+        write_value(section.start_index);
+        write_value(section.length);
+        write_value(section.section_spacing_nm);
+        write_value(section.wave_wavelength_nm);
+        write_value(section.wave_amplitude);
+        write_value(section.wave_amplitude_offset);
+        write_value(section.wave_phase_nm);
+        write_value(section.fit_tolerance);
+        write_value(section.max_residual);
+        write_value(section.mean_residual);
     }
 
     copy_to_buffer(state.wave_path, output_path.lexically_normal().string());
@@ -1882,24 +1937,38 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         throw std::runtime_error("not a thrystr wave settings file");
     }
 
-    const std::uint32_t version = read_binary<std::uint32_t>(input);
-    if (version != 1 && version != 2 && version != kWaveSettingsVersion) {
+    const std::uint32_t version = read_binary_le<std::uint32_t>(input);
+    const bool portable_payload = version >= 4;
+    if (version != 1 && version != 2 && version != 3 && version != kWaveSettingsVersion) {
         throw std::runtime_error("unsupported wave settings version");
     }
+    if (portable_payload) {
+        const std::uint32_t stamp = read_binary_le<std::uint32_t>(input);
+        if (stamp != kWaveSettingsEndianStamp) {
+            throw std::runtime_error("wave settings endian stamp mismatch");
+        }
+    }
 
-    state.max_slope = read_binary<float>(input);
-    state.wave_scale = read_binary<float>(input);
-    state.wave_tolerance = read_binary<float>(input);
-    state.phase_steps = read_binary<int>(input);
-    state.phase_test_points = read_binary<int>(input);
-    state.zoom_x = read_binary<float>(input);
-    state.zoom_y = read_binary<float>(input);
-    state.show_points = read_binary<std::uint8_t>(input) != 0;
-    state.show_lines = read_binary<std::uint8_t>(input) != 0;
-    (void)read_binary<std::uint8_t>(input);
-    (void)read_binary<std::uint8_t>(input);
-    const double sine_phase = read_binary<double>(input);
-    const double cosine_phase = read_binary<double>(input);
+    const auto read_value = [&]<typename T>() -> T {
+        return portable_payload ? read_binary_le<T>(input) : read_binary<T>(input);
+    };
+    const auto read_text = [&]() -> std::string {
+        return portable_payload ? read_string_le(input) : read_string(input);
+    };
+
+    state.max_slope = read_value.template operator()<float>();
+    state.wave_scale = read_value.template operator()<float>();
+    state.wave_tolerance = read_value.template operator()<float>();
+    state.phase_steps = read_value.template operator()<int>();
+    state.phase_test_points = read_value.template operator()<int>();
+    state.zoom_x = read_value.template operator()<float>();
+    state.zoom_y = read_value.template operator()<float>();
+    state.show_points = read_value.template operator()<std::uint8_t>() != 0;
+    state.show_lines = read_value.template operator()<std::uint8_t>() != 0;
+    (void)read_value.template operator()<std::uint8_t>();
+    (void)read_value.template operator()<std::uint8_t>();
+    const double sine_phase = read_value.template operator()<double>();
+    const double cosine_phase = read_value.template operator()<double>();
 
     state.entities.clear();
     state.selected_entity_id = 0;
@@ -1910,7 +1979,7 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     state.fitted_sections.clear();
     state.fit_validation = {};
 
-    const std::uint32_t mapper_count = read_binary<std::uint32_t>(input);
+    const std::uint32_t mapper_count = read_value.template operator()<std::uint32_t>();
     if (mapper_count > kMaxWaveSettingsItems) {
         throw std::runtime_error("wave settings mapper count too large");
     }
@@ -1918,14 +1987,14 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
     state.mappers.reserve(mapper_count);
     for (std::uint32_t i = 0; i < mapper_count; ++i) {
         const auto kind = static_cast<thrystr::ValueMapperKind>(
-            read_binary<std::uint32_t>(input));
-        const double operand = read_binary<double>(input);
-        const bool enabled = read_binary<std::uint8_t>(input) != 0;
+            read_value.template operator()<std::uint32_t>());
+        const double operand = read_value.template operator()<double>();
+        const bool enabled = read_value.template operator()<std::uint8_t>() != 0;
         state.mappers.push_back({kind, operand, enabled});
     }
 
     if (version >= 2) {
-        const std::uint32_t entity_count = read_binary<std::uint32_t>(input);
+        const std::uint32_t entity_count = read_value.template operator()<std::uint32_t>();
         if (entity_count > kMaxWaveSettingsItems) {
             throw std::runtime_error("wave settings entity count too large");
         }
@@ -1934,24 +2003,26 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         int wave_count = 0;
         for (std::uint32_t i = 0; i < entity_count; ++i) {
             Entity entity;
-            entity.id = read_binary<std::int32_t>(input);
-            entity.type = static_cast<EntityType>(read_binary<std::uint32_t>(input));
-            entity.visible = read_binary<std::uint8_t>(input) != 0;
-            entity.name = read_string(input);
-            entity.data.spatial_period_nm = read_binary<double>(input);
-            entity.wave.wavelength_nm = read_binary<double>(input);
-            entity.wave.amplitude = read_binary<double>(input);
-            entity.wave.amplitude_offset = read_binary<double>(input);
-            entity.wave.phase_nm = read_binary<double>(input);
-            const std::uint32_t modifier_count = read_binary<std::uint32_t>(input);
+            entity.id = read_value.template operator()<std::int32_t>();
+            entity.type = static_cast<EntityType>(
+                read_value.template operator()<std::uint32_t>());
+            entity.visible = read_value.template operator()<std::uint8_t>() != 0;
+            entity.name = read_text();
+            entity.data.spatial_period_nm = read_value.template operator()<double>();
+            entity.wave.wavelength_nm = read_value.template operator()<double>();
+            entity.wave.amplitude = read_value.template operator()<double>();
+            entity.wave.amplitude_offset = read_value.template operator()<double>();
+            entity.wave.phase_nm = read_value.template operator()<double>();
+            const std::uint32_t modifier_count =
+                read_value.template operator()<std::uint32_t>();
             if (modifier_count > kMaxWaveSettingsItems) {
                 throw std::runtime_error("wave settings modifier count too large");
             }
             entity.wave.wavelength_modifiers.reserve(modifier_count);
             for (std::uint32_t modifier_index = 0; modifier_index < modifier_count;
                  ++modifier_index) {
-                const double x_nm = read_binary<double>(input);
-                const double delta_nm = read_binary<double>(input);
+                const double x_nm = read_value.template operator()<double>();
+                const double delta_nm = read_value.template operator()<double>();
                 entity.wave.wavelength_modifiers.push_back({x_nm, delta_nm});
             }
             max_entity_id = std::max(max_entity_id, entity.id);
@@ -1962,18 +2033,19 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
         }
         state.next_entity_id = std::max(state.next_entity_id, max_entity_id + 1);
         state.wave_serial = std::max(state.wave_serial, wave_count + 1);
-        state.selected_entity_id = read_binary<std::int32_t>(input);
-        state.segment.active = read_binary<std::uint8_t>(input) != 0;
+        state.selected_entity_id = read_value.template operator()<std::int32_t>();
+        state.segment.active = read_value.template operator()<std::uint8_t>() != 0;
         state.segment.selection_start =
-            static_cast<std::size_t>(read_binary<std::uint64_t>(input));
+            static_cast<std::size_t>(read_value.template operator()<std::uint64_t>());
         state.segment.selection_end =
-            static_cast<std::size_t>(read_binary<std::uint64_t>(input));
-        const std::string source_path = read_string(input);
+            static_cast<std::size_t>(read_value.template operator()<std::uint64_t>());
+        const std::string source_path = read_text();
         if (!source_path.empty()) {
             copy_to_buffer(state.path, source_path);
         }
         if (version >= 3) {
-            const std::uint32_t section_count = read_binary<std::uint32_t>(input);
+            const std::uint32_t section_count =
+                read_value.template operator()<std::uint32_t>();
             if (section_count > kMaxWaveSettingsItems) {
                 throw std::runtime_error("wave settings section count too large");
             }
@@ -1981,16 +2053,16 @@ void load_wave_settings(AppState& state, const std::filesystem::path& path) {
             for (std::uint32_t section_index = 0; section_index < section_count;
                  ++section_index) {
                 thrystr::app::Section section;
-                section.start_index = read_binary<std::uint32_t>(input);
-                section.length = read_binary<std::uint32_t>(input);
-                section.section_spacing_nm = read_binary<double>(input);
-                section.wave_wavelength_nm = read_binary<double>(input);
-                section.wave_amplitude = read_binary<double>(input);
-                section.wave_amplitude_offset = read_binary<double>(input);
-                section.wave_phase_nm = read_binary<double>(input);
-                section.fit_tolerance = read_binary<double>(input);
-                section.max_residual = read_binary<double>(input);
-                section.mean_residual = read_binary<double>(input);
+                section.start_index = read_value.template operator()<std::uint32_t>();
+                section.length = read_value.template operator()<std::uint32_t>();
+                section.section_spacing_nm = read_value.template operator()<double>();
+                section.wave_wavelength_nm = read_value.template operator()<double>();
+                section.wave_amplitude = read_value.template operator()<double>();
+                section.wave_amplitude_offset = read_value.template operator()<double>();
+                section.wave_phase_nm = read_value.template operator()<double>();
+                section.fit_tolerance = read_value.template operator()<double>();
+                section.max_residual = read_value.template operator()<double>();
+                section.mean_residual = read_value.template operator()<double>();
                 state.fitted_sections.push_back(section);
             }
         }
