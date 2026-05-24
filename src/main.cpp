@@ -6,7 +6,10 @@
 #include <thrystr/render_io.hpp>
 
 #include <GLFW/glfw3.h>
-#if defined(THRYSTR_HAS_X11)
+#if defined(THRYSTR_HAS_X11) && defined(__linux__)
+#define THRYSTR_USE_X11
+#endif
+#if defined(THRYSTR_USE_X11)
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
 #include <X11/Xatom.h>
@@ -384,7 +387,7 @@ void force_undecorated_window(GLFWwindow* window) {
         return;
     }
     glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
-#if defined(THRYSTR_HAS_X11)
+#if defined(THRYSTR_USE_X11)
     if (glfwGetPlatform() != GLFW_PLATFORM_X11) {
         return;
     }
@@ -627,7 +630,7 @@ GLFWcursor* cursor_for_action(const ChromeCursors& cursors, ChromeAction action)
 std::pair<double, double> global_cursor_position(GLFWwindow* window,
                                                  double cursor_x,
                                                  double cursor_y) {
-#if defined(THRYSTR_HAS_X11)
+#if defined(THRYSTR_USE_X11)
     if (window && glfwGetPlatform() == GLFW_PLATFORM_X11) {
         Display* display = glfwGetX11Display();
         const Window xwindow = glfwGetX11Window(window);
@@ -684,7 +687,7 @@ void update_chrome_action(AppState& state,
     const int dy = static_cast<int>(std::lround(global_y - state.chrome_start_global_y));
 
     if (state.chrome_action == ChromeAction::Move) {
-#if defined(THRYSTR_HAS_X11)
+#if defined(THRYSTR_USE_X11)
         if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
             Display* display = glfwGetX11Display();
             const Window xwindow = glfwGetX11Window(window);
@@ -731,7 +734,7 @@ void update_chrome_action(AppState& state,
         h = std::max(kMinWindowHeight, state.chrome_start_window_h + dy);
     }
 
-#if defined(THRYSTR_HAS_X11)
+#if defined(THRYSTR_USE_X11)
     if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
         Display* display = glfwGetX11Display();
         const Window xwindow = glfwGetX11Window(window);
