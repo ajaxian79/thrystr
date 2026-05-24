@@ -181,7 +181,11 @@ struct AutoFitJob {
     std::atomic<bool> cancel_requested{false};
     std::mutex result_mutex;
     std::vector<thrystr::app::Section> sections;
+    thrystr::app::WorkspaceModel workspace;
+    thrystr::app::ValidationReport validation;
     bool cancelled = false;
+    bool multi_track = false;
+    bool used_parity = false;
     std::size_t start_offset = 0;
     std::size_t requested_last = 0;
     std::size_t capped_last = 0;
@@ -1669,6 +1673,24 @@ std::vector<float> collect_scalars_for_range(AppState& state,
     return scalars;
 }
 
+std::vector<thrystr::app::Section> data_sections_from_workspace(
+    const thrystr::app::WorkspaceModel& workspace) {
+    std::vector<thrystr::app::Section> sections;
+    for (const thrystr::app::Track& track : workspace.tracks) {
+        if (track.kind != thrystr::app::TrackKind::Data) {
+            continue;
+        }
+        sections.insert(sections.end(), track.sections.begin(), track.sections.end());
+    }
+    std::sort(sections.begin(), sections.end(), [](const auto& left, const auto& right) {
+        if (left.start_index != right.start_index) {
+            return left.start_index < right.start_index;
+        }
+        return left.length < right.length;
+    });
+    return sections;
+}
+
 thrystr::app::ValidationReport validate_fitted_sections(AppState& state) {
     thrystr::app::ValidationReport report;
     if (!state.analysis || state.fitted_sections.empty()) {
@@ -1734,7 +1756,7 @@ thrystr::app::ValidationReport validate_fitted_sections(AppState& state) {
     return report;
 }
 
-void auto_fit_current_range(AppState& state) {
+void auto_fit_current_range(AppState& state, bool multi_track = false) {
     if (!state.analysis || source_sample_count(state) == 0u) {
         state.status = "Load source data before auto-fit";
         return;
@@ -1748,6 +1770,10 @@ void auto_fit_current_range(AppState& state) {
     }
 
     const auto [first, requested_last] = analysis_selection_bounds(state);
+    if (multi_track && first != 0u) {
+        state.status = "Track auto-fit currently starts at source index 0";
+        return;
+    }
     const std::size_t capped_last =
         std::min(requested_last, first + kAutoFitMaxSamples - 1u);
     std::vector<float> scalars = collect_scalars_for_range(state, first, capped_last);
@@ -1766,6 +1792,8 @@ void auto_fit_current_range(AppState& state) {
     job.done.store(false);
     job.running.store(true);
     job.cancelled = false;
+    job.multi_track = multi_track;
+    job.used_parity = false;
     job.start_offset = first;
     job.requested_last = requested_last;
     job.capped_last = capped_last;
@@ -1773,20 +1801,48 @@ void auto_fit_current_range(AppState& state) {
     {
         std::scoped_lock lock(job.result_mutex);
         job.sections.clear();
+        job.workspace = {};
+        job.validation = {};
     }
 
-    state.status = "Auto-fit running on " + format_count(scalars.size()) + " samples";
+    state.status = std::string(multi_track ? "Track auto-fit running on "
+                                           : "Auto-fit running on ") +
+                   format_count(scalars.size()) + " samples";
     job.worker = std::jthread([&job,
                                samples = std::move(scalars),
+                               multi_track,
                                options]() mutable {
         try {
-            options.cancel_requested = &job.cancel_requested;
-            const thrystr::app::ConvergentFitResult fit =
-                thrystr::app::fit_convergent_sections(samples, options);
-            {
-                std::scoped_lock lock(job.result_mutex);
-                job.sections = fit.sections;
-                job.cancelled = fit.cancelled;
+            if (multi_track) {
+                thrystr::app::MultiTrackOptions track_options;
+                track_options.tolerance = options.tolerance;
+                track_options.default_spacing_nm = options.default_spacing_nm;
+                track_options.max_section_length = options.max_section_length;
+                track_options.max_data_tracks = 8u;
+                track_options.cancel_requested = &job.cancel_requested;
+                const thrystr::app::MultiTrackFitResult fit =
+                    thrystr::app::fit_multi_track_sections(samples, track_options);
+                const thrystr::app::ValidationReport validation =
+                    thrystr::app::validate_tracks(samples,
+                                                  fit.workspace,
+                                                  track_options.parity_margin);
+                {
+                    std::scoped_lock lock(job.result_mutex);
+                    job.workspace = fit.workspace;
+                    job.sections = data_sections_from_workspace(fit.workspace);
+                    job.validation = validation;
+                    job.used_parity = fit.used_parity;
+                    job.cancelled = fit.cancelled;
+                }
+            } else {
+                options.cancel_requested = &job.cancel_requested;
+                const thrystr::app::ConvergentFitResult fit =
+                    thrystr::app::fit_convergent_sections(samples, options);
+                {
+                    std::scoped_lock lock(job.result_mutex);
+                    job.sections = fit.sections;
+                    job.cancelled = fit.cancelled;
+                }
             }
         } catch (const std::exception& error) {
             std::scoped_lock lock(job.result_mutex);
@@ -1814,12 +1870,20 @@ void finish_auto_fit_if_ready(AppState& state) {
     }
 
     std::vector<thrystr::app::Section> sections;
+    thrystr::app::WorkspaceModel workspace;
+    thrystr::app::ValidationReport validation;
     bool cancelled = false;
+    bool multi_track = false;
+    bool used_parity = false;
     std::string error;
     {
         std::scoped_lock lock(job.result_mutex);
         sections = job.sections;
+        workspace = job.workspace;
+        validation = job.validation;
         cancelled = job.cancelled;
+        multi_track = job.multi_track;
+        used_parity = job.used_parity;
         error = job.error;
     }
     job.running.store(false);
@@ -1834,24 +1898,36 @@ void finish_auto_fit_if_ready(AppState& state) {
     for (thrystr::app::Section& section : state.fitted_sections) {
         section.start_index += static_cast<std::uint32_t>(job.start_offset);
     }
-    state.fitted_workspace = {};
-    thrystr::app::Track track;
-    track.id = 0u;
-    track.kind = thrystr::app::TrackKind::Data;
-    track.name = "single track";
-    track.sections = state.fitted_sections;
-    state.fitted_workspace.tracks.push_back(std::move(track));
-    state.fitted_workspace.active_track_id = 0u;
-    state.fitted_workspace.parity_track_id = thrystr::app::kNoParityTrack;
-    state.fitted_workspace_valid = true;
-    state.fitted_workspace_used_parity = false;
-    state.fit_validation = validate_fitted_sections(state);
+    if (multi_track && !workspace.tracks.empty()) {
+        state.fitted_workspace = std::move(workspace);
+        state.fitted_workspace_valid = true;
+        state.fitted_workspace_used_parity = used_parity;
+        state.fit_validation = validation;
+    } else {
+        state.fitted_workspace = {};
+        thrystr::app::Track track;
+        track.id = 0u;
+        track.kind = thrystr::app::TrackKind::Data;
+        track.name = "single track";
+        track.sections = state.fitted_sections;
+        state.fitted_workspace.tracks.push_back(std::move(track));
+        state.fitted_workspace.active_track_id = 0u;
+        state.fitted_workspace.parity_track_id = thrystr::app::kNoParityTrack;
+        state.fitted_workspace_valid = true;
+        state.fitted_workspace_used_parity = false;
+        state.fit_validation = validate_fitted_sections(state);
+    }
     state.show_reconstruction_only = true;
-    state.status = std::string(cancelled ? "Auto-fit cancelled: " : "Auto-fit: ") +
+    state.status = std::string(cancelled ? "Auto-fit cancelled: "
+                                         : multi_track ? "Track auto-fit: "
+                                                       : "Auto-fit: ") +
                    format_count(state.fitted_sections.size()) + " sections, " +
                    format_count(state.fit_validation.checked_samples) +
                    " samples, max residual " +
                    std::to_string(state.fit_validation.max_residual);
+    if (multi_track) {
+        state.status += used_parity ? " + parity" : " single-track fallback";
+    }
     if (job.requested_last != job.capped_last) {
         state.status += " (range capped)";
     }
@@ -3260,6 +3336,11 @@ void draw_entity_toolbox(AppState& state) {
                     skald::KvRowStatus("auto-fit", "running", skald::BadgeTone::Info);
                 } else if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
                     auto_fit_current_range(state);
+                }
+                ImGui::SameLine();
+                if (!state.auto_fit_job.running.load() &&
+                    skald::GhostButton("Auto-Fit Tracks", ImVec2(138.0f, 0.0f))) {
+                    auto_fit_current_range(state, true);
                 }
                 if (!state.fitted_sections.empty()) {
                     skald::KvRow("fit sections", "%s",
