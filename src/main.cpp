@@ -117,6 +117,14 @@ struct Args {
     int width = 1600;
     int height = 900;
     int frames = 0;
+    bool size_overridden = false;
+};
+
+struct WindowGeometry {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
 };
 
 struct FileBrowserEntry {
@@ -210,13 +218,15 @@ Args parse_args(int argc, char** argv) {
         const auto next_int = [&](int& dst, const char* flag) {
             if (arg == flag && i + 1 < argc) {
                 dst = std::max(0, std::atoi(argv[++i]));
+                return true;
             }
+            return false;
         };
 
         next_string(args.file, "--file");
         next_string(args.screenshot, "--screenshot");
-        next_int(args.width, "--width");
-        next_int(args.height, "--height");
+        args.size_overridden |= next_int(args.width, "--width");
+        args.size_overridden |= next_int(args.height, "--height");
         next_int(args.frames, "--frames");
     }
     if (!args.screenshot.empty() && args.frames == 0) {
@@ -300,6 +310,42 @@ void center_window_on_primary_monitor(GLFWwindow* window) {
     glfwSetWindowPos(window,
                      work_x + std::max(0, (work_w - window_w) / 2),
                      work_y + std::max(0, (work_h - window_h) / 2));
+}
+
+std::optional<WindowGeometry> default_workspace_geometry() {
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    if (!monitor) {
+        return std::nullopt;
+    }
+
+    int work_x = 0;
+    int work_y = 0;
+    int work_w = 0;
+    int work_h = 0;
+    glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_w, &work_h);
+    if (work_w <= 0 || work_h <= 0) {
+        return std::nullopt;
+    }
+
+    const int left_margin = std::min(50, static_cast<int>(std::floor(work_w * 0.05)));
+    const int right_margin = std::min(50, static_cast<int>(std::floor(work_w * 0.05)));
+    const int top_margin = std::min(50, static_cast<int>(std::floor(work_h * 0.05)));
+    const int bottom_margin = std::min(150, static_cast<int>(std::floor(work_h * 0.15)));
+
+    WindowGeometry geometry;
+    geometry.x = work_x + left_margin;
+    geometry.y = work_y + top_margin;
+    geometry.width = std::max(kMinWindowWidth, work_w - left_margin - right_margin);
+    geometry.height = std::max(kMinWindowHeight, work_h - top_margin - bottom_margin);
+    return geometry;
+}
+
+void apply_window_geometry(GLFWwindow* window, const WindowGeometry& geometry) {
+    if (!window) {
+        return;
+    }
+    glfwSetWindowPos(window, geometry.x, geometry.y);
+    glfwSetWindowSize(window, geometry.width, geometry.height);
 }
 
 GLFWwindow* create_undecorated_window(int width,
@@ -3029,8 +3075,19 @@ int main(int argc, char** argv) {
         state.splash_open = false;
     }
 
-    GLFWwindow* window = create_undecorated_window(args.width,
-                                                  args.height,
+    std::optional<WindowGeometry> workspace_geometry;
+    int workspace_width = args.width;
+    int workspace_height = args.height;
+    if (!args.size_overridden) {
+        workspace_geometry = default_workspace_geometry();
+        if (workspace_geometry) {
+            workspace_width = workspace_geometry->width;
+            workspace_height = workspace_geometry->height;
+        }
+    }
+
+    GLFWwindow* window = create_undecorated_window(workspace_width,
+                                                  workspace_height,
                                                   "thrystr",
                                                   kMinWindowWidth,
                                                   kMinWindowHeight,
@@ -3040,6 +3097,9 @@ int main(int argc, char** argv) {
         destroy_chrome_cursors(chrome_cursors);
         glfwTerminate();
         return 1;
+    }
+    if (workspace_geometry) {
+        apply_window_geometry(window, *workspace_geometry);
     }
 
     begin_imgui_for_window(window);
