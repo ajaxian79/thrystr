@@ -23,4 +23,4 @@ void destroy_texture(unsigned int& texture_id);
 /// Capture the current framebuffer to a PNG.
 bool save_screenshot_png(const std::filesystem::path& path, int width, int height);
 
-}  // namespace thrystr
+} // namespace thrystr

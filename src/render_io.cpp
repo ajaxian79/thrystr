@@ -8,6 +8,10 @@
 #include <cstring>
 #include <vector>
 
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 namespace thrystr {
 
 Texture2D load_rgba_texture(const std::filesystem::path& path) {

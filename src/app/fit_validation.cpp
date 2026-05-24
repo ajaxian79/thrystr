@@ -8,11 +8,8 @@
 namespace thrystr::app {
 namespace {
 
-void fail(ValidationReport& report,
-          std::string message,
-          std::size_t track_index = 0,
-          std::size_t section_index = 0,
-          std::size_t sample_index = 0) {
+void fail(ValidationReport& report, std::string message, std::size_t track_index = 0,
+          std::size_t section_index = 0, std::size_t sample_index = 0) {
     report.pass = false;
     report.issues.push_back(ValidationIssue{
         std::move(message),
@@ -34,8 +31,7 @@ void finalize_mean(ValidationReport& report) {
     }
 }
 
-const Section* containing_section(std::span<const Section> sections,
-                                  std::size_t index,
+const Section* containing_section(std::span<const Section> sections, std::size_t index,
                                   std::size_t* section_index) {
     for (std::size_t i = 0; i < sections.size(); ++i) {
         if (section_contains(sections[i], index)) {
@@ -48,7 +44,7 @@ const Section* containing_section(std::span<const Section> sections,
     return nullptr;
 }
 
-}  // namespace
+} // namespace
 
 ValidationReport validate_sections(std::span<const float> scalars,
                                    std::span<const Section> sections) {
@@ -70,8 +66,7 @@ ValidationReport validate_sections(std::span<const float> scalars,
         }
         for (std::size_t index = section.start_index; index < section_end(section); ++index) {
             const double residual =
-                std::abs(wave_value_at_index(section, index) -
-                         static_cast<double>(scalars[index]));
+                std::abs(wave_value_at_index(section, index) - static_cast<double>(scalars[index]));
             record_residual(report, residual);
             if (residual > section.fit_tolerance) {
                 fail(report, "section residual exceeds tolerance", 0, section_index, index);
@@ -86,8 +81,7 @@ ValidationReport validate_sections(std::span<const float> scalars,
     return report;
 }
 
-ValidationReport validate_tracks(std::span<const float> scalars,
-                                 const WorkspaceModel& workspace,
+ValidationReport validate_tracks(std::span<const float> scalars, const WorkspaceModel& workspace,
                                  double parity_margin) {
     ValidationReport report;
     if (workspace.tracks.empty() || workspace.tracks.size() > kMaxTracks) {
@@ -144,20 +138,18 @@ ValidationReport validate_tracks(std::span<const float> scalars,
                 continue;
             }
             std::size_t section_index = 0;
-            const Section* section =
-                containing_section(track.sections, index, &section_index);
+            const Section* section = containing_section(track.sections, index, &section_index);
             if (!section) {
-                fail(report, "owned sample is not covered by a data section",
-                     track_index, 0, index);
+                fail(report, "owned sample is not covered by a data section", track_index, 0,
+                     index);
                 continue;
             }
-            const double residual =
-                std::abs(wave_value_at_index(*section, index) -
-                         static_cast<double>(scalars[index]));
+            const double residual = std::abs(wave_value_at_index(*section, index) -
+                                             static_cast<double>(scalars[index]));
             record_residual(report, residual);
             if (residual > section->fit_tolerance) {
-                fail(report, "data track residual exceeds tolerance",
-                     track_index, section_index, index);
+                fail(report, "data track residual exceeds tolerance", track_index, section_index,
+                     index);
             }
         }
     }
@@ -169,15 +161,14 @@ ValidationReport validate_tracks(std::span<const float> scalars,
             const Section* section =
                 containing_section(parity_track.sections, index, &section_index);
             if (!section) {
-                fail(report, "sample is not covered by parity track",
-                     parity_index, 0, index);
+                fail(report, "sample is not covered by parity track", parity_index, 0, index);
                 continue;
             }
             const double expected = static_cast<double>(owner[index]);
             const double residual = std::abs(wave_value_at_index(*section, index) - expected);
             if (residual > 0.5 - parity_margin) {
-                fail(report, "parity routing residual exceeds rounding margin",
-                     parity_index, section_index, index);
+                fail(report, "parity routing residual exceeds rounding margin", parity_index,
+                     section_index, index);
             }
         }
     }
@@ -186,4 +177,4 @@ ValidationReport validate_tracks(std::span<const float> scalars,
     return report;
 }
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

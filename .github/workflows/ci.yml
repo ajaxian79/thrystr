@@ -78,7 +78,7 @@ jobs:
           sudo apt-get install -y clang-format
       - name: Check formatting
         run: |
-          files=$(git ls-files 'include/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tests/**/*.cpp' 'tools/**/*.cpp' 'tools/**/*.hpp')
+          files=$(git ls-files 'include/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tests/**/*.cpp' 'tools/**/*.cpp' 'tools/**/*.hpp' | grep -v '/vendor/' || true)
           test -z "$files" || clang-format --dry-run --Werror $files
 
   tidy:
@@ -126,3 +126,5 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

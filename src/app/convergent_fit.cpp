@@ -21,8 +21,7 @@ bool cancelled(const ConvergentFitOptions& options) {
     return options.cancel_requested && options.cancel_requested->load();
 }
 
-std::pair<double, double> min_max_range(std::span<const float> scalars,
-                                        std::size_t start,
+std::pair<double, double> min_max_range(std::span<const float> scalars, std::size_t start,
                                         std::size_t length) {
     double low = std::numeric_limits<double>::infinity();
     double high = -std::numeric_limits<double>::infinity();
@@ -34,17 +33,14 @@ std::pair<double, double> min_max_range(std::span<const float> scalars,
     return {low, high};
 }
 
-CandidateScore score_candidate(std::span<const float> scalars,
-                               std::size_t start,
-                               std::size_t length,
-                               Section section) {
+CandidateScore score_candidate(std::span<const float> scalars, std::size_t start,
+                               std::size_t length, Section section) {
     CandidateScore score;
     score.section = section;
     double sum = 0.0;
     for (std::size_t index = start; index < start + length; ++index) {
         const double residual =
-            std::abs(wave_value_at_index(section, index) -
-                     static_cast<double>(scalars[index]));
+            std::abs(wave_value_at_index(section, index) - static_cast<double>(scalars[index]));
         score.max_residual = std::max(score.max_residual == std::numeric_limits<double>::infinity()
                                           ? 0.0
                                           : score.max_residual,
@@ -67,8 +63,7 @@ bool better_score(const CandidateScore& candidate, const CandidateScore& best) {
     return candidate.section.wave_amplitude < best.section.wave_amplitude;
 }
 
-Section singleton_section(std::span<const float> scalars,
-                          std::size_t start,
+Section singleton_section(std::span<const float> scalars, std::size_t start,
                           const ConvergentFitOptions& options) {
     Section section;
     section.start_index = static_cast<std::uint32_t>(start);
@@ -81,8 +76,7 @@ Section singleton_section(std::span<const float> scalars,
     return section;
 }
 
-Section two_point_section(std::span<const float> scalars,
-                          std::size_t start,
+Section two_point_section(std::span<const float> scalars, std::size_t start,
                           const ConvergentFitOptions& options) {
     const double first = static_cast<double>(scalars[start]);
     const double second = static_cast<double>(scalars[start + 1u]);
@@ -103,8 +97,7 @@ Section two_point_section(std::span<const float> scalars,
     return score.section;
 }
 
-std::vector<double> wavelength_candidates(double spacing,
-                                          std::size_t length,
+std::vector<double> wavelength_candidates(double spacing, std::size_t length,
                                           int wavelength_steps) {
     const double span_nm = std::max(spacing, static_cast<double>(length - 1u) * spacing);
     const double low = std::max(spacing * 2.0, span_nm / 32.0);
@@ -114,8 +107,8 @@ std::vector<double> wavelength_candidates(double spacing,
 
     for (int step = 0; step < std::max(1, wavelength_steps); ++step) {
         const double t = wavelength_steps > 1
-            ? static_cast<double>(step) / static_cast<double>(wavelength_steps - 1)
-            : 0.0;
+                             ? static_cast<double>(step) / static_cast<double>(wavelength_steps - 1)
+                             : 0.0;
         values.push_back(std::exp(std::log(low) + (std::log(high) - std::log(low)) * t));
     }
     for (double periods = 0.5; periods <= 32.0; periods += 0.5) {
@@ -123,19 +116,15 @@ std::vector<double> wavelength_candidates(double spacing,
     }
 
     std::sort(values.begin(), values.end());
-    values.erase(std::unique(values.begin(),
-                             values.end(),
-                             [](double left, double right) {
-                                 return std::abs(left - right) <= 1.0e-9;
-                             }),
-                 values.end());
+    values.erase(
+        std::unique(values.begin(), values.end(),
+                    [](double left, double right) { return std::abs(left - right) <= 1.0e-9; }),
+        values.end());
     return values;
 }
 
-CandidateScore fit_grid_section(std::span<const float> scalars,
-                                std::size_t start,
-                                std::size_t length,
-                                const ConvergentFitOptions& options) {
+CandidateScore fit_grid_section(std::span<const float> scalars, std::size_t start,
+                                std::size_t length, const ConvergentFitOptions& options) {
     const auto [low, high] = min_max_range(scalars, start, length);
     if (high - low <= options.tolerance) {
         Section section = singleton_section(scalars, start, options);
@@ -174,11 +163,8 @@ CandidateScore fit_grid_section(std::span<const float> scalars,
     return best;
 }
 
-bool range_fits(std::span<const float> scalars,
-                std::size_t start,
-                std::size_t length,
-                const ConvergentFitOptions& options,
-                Section* section) {
+bool range_fits(std::span<const float> scalars, std::size_t start, std::size_t length,
+                const ConvergentFitOptions& options, Section* section) {
     const Section candidate = fit_section(scalars, start, length, options);
     if (section) {
         *section = candidate;
@@ -186,11 +172,9 @@ bool range_fits(std::span<const float> scalars,
     return candidate.max_residual <= options.tolerance;
 }
 
-}  // namespace
+} // namespace
 
-Section fit_section(std::span<const float> scalars,
-                    std::size_t start,
-                    std::size_t length,
+Section fit_section(std::span<const float> scalars, std::size_t start, std::size_t length,
                     const ConvergentFitOptions& options) {
     if (start >= scalars.size() || length == 0u) {
         return {};
@@ -205,9 +189,8 @@ Section fit_section(std::span<const float> scalars,
     return fit_grid_section(scalars, start, length, options).section;
 }
 
-ConvergentFitResult fit_convergent_sections(
-    std::span<const float> scalars,
-    const ConvergentFitOptions& options) {
+ConvergentFitResult fit_convergent_sections(std::span<const float> scalars,
+                                            const ConvergentFitOptions& options) {
     ConvergentFitResult result;
     if (scalars.empty()) {
         return result;
@@ -261,10 +244,9 @@ ConvergentFitResult fit_convergent_sections(
         result.sections.push_back(best);
     }
 
-    result.mean_residual = residual_samples == 0u
-        ? 0.0
-        : residual_sum / static_cast<double>(residual_samples);
+    result.mean_residual =
+        residual_samples == 0u ? 0.0 : residual_sum / static_cast<double>(residual_samples);
     return result;
 }
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

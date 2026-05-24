@@ -32,8 +32,7 @@ ValidationReport validate_sections(std::span<const float> scalars,
                                    std::span<const Section> sections);
 
 /// Validate single-track or multi-track workspace coverage.
-ValidationReport validate_tracks(std::span<const float> scalars,
-                                 const WorkspaceModel& workspace,
+ValidationReport validate_tracks(std::span<const float> scalars, const WorkspaceModel& workspace,
                                  double parity_margin = 0.4);
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

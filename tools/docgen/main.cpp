@@ -50,13 +50,11 @@ void write_text(const std::filesystem::path& path, std::string_view text) {
 
 std::string trim(std::string_view text) {
     std::size_t first = 0;
-    while (first < text.size() &&
-           std::isspace(static_cast<unsigned char>(text[first])) != 0) {
+    while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first])) != 0) {
         ++first;
     }
     std::size_t last = text.size();
-    while (last > first &&
-           std::isspace(static_cast<unsigned char>(text[last - 1u])) != 0) {
+    while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1u])) != 0) {
         --last;
     }
     return std::string(text.substr(first, last - first));
@@ -166,8 +164,7 @@ std::string inline_markup(std::string_view text) {
     std::string buffer;
     for (char ch : text) {
         if (ch == '`') {
-            out += code ? escape_html(buffer) + "</code>"
-                        : escape_html(buffer) + "<code>";
+            out += code ? escape_html(buffer) + "</code>" : escape_html(buffer) + "<code>";
             buffer.clear();
             code = !code;
         } else {
@@ -228,14 +225,14 @@ std::string render_markdown(std::string_view markdown) {
             close_lists();
             continue;
         }
-        if (line.rfind("# ", 0) == 0 || line.rfind("## ", 0) == 0 ||
-            line.rfind("### ", 0) == 0) {
+        if (line.rfind("# ", 0) == 0 || line.rfind("## ", 0) == 0 || line.rfind("### ", 0) == 0) {
             close_paragraph();
             close_lists();
             const int level = line.rfind("### ", 0) == 0 ? 3 : line.rfind("## ", 0) == 0 ? 2 : 1;
-            const std::string text = trim(std::string_view(line).substr(static_cast<std::size_t>(level) + 1u));
-            html << "<h" << level << " id=\"" << slugify(text) << "\">"
-                 << inline_markup(text) << "</h" << level << ">\n";
+            const std::string text =
+                trim(std::string_view(line).substr(static_cast<std::size_t>(level) + 1u));
+            html << "<h" << level << " id=\"" << slugify(text) << "\">" << inline_markup(text)
+                 << "</h" << level << ">\n";
             continue;
         }
         if (line.rfind("- ", 0) == 0) {
@@ -361,20 +358,24 @@ std::string site_shell(const std::vector<Page>& pages, const Page& current) {
 
 void emit_site(const std::vector<Page>& pages, const std::filesystem::path& site_dir) {
     std::filesystem::create_directories(site_dir);
-    write_text(site_dir / "style.css",
-               "body{margin:0;background:#171512;color:#ece6d8;font:15px Inter,system-ui,sans-serif;}"
-               "nav{position:fixed;inset:0 auto 0 0;width:260px;overflow:auto;background:#211e1a;padding:18px;}"
-               "nav strong{display:block;font-size:22px;margin-bottom:14px;color:#7ddbd4;}"
-               "nav a{display:block;color:#bdb5a8;text-decoration:none;padding:7px 0;}"
-               "nav a.active,nav a:hover{color:#ece6d8;}"
-               "main{margin-left:296px;max-width:920px;padding:28px 44px;}"
-               "article{line-height:1.62;}"
-               "h1,h2,h3{color:#f7f0df;letter-spacing:0;}"
-               "code,pre{background:#2a261f;color:#f4d58d;border-radius:4px;}"
-               "code{padding:1px 4px;}pre{padding:14px;overflow:auto;}"
-               "#search{width:100%;box-sizing:border-box;margin-bottom:14px;background:#24211c;color:#ece6d8;border:1px solid #4b463d;padding:10px;}"
-               "#results a{display:block;color:#7ddbd4;text-decoration:none;padding:4px 0;}"
-               "@media(max-width:760px){nav{position:static;width:auto;}main{margin-left:0;padding:22px;}}\n");
+    write_text(
+        site_dir / "style.css",
+        "body{margin:0;background:#171512;color:#ece6d8;font:15px Inter,system-ui,sans-serif;}"
+        "nav{position:fixed;inset:0 auto 0 "
+        "0;width:260px;overflow:auto;background:#211e1a;padding:18px;}"
+        "nav strong{display:block;font-size:22px;margin-bottom:14px;color:#7ddbd4;}"
+        "nav a{display:block;color:#bdb5a8;text-decoration:none;padding:7px 0;}"
+        "nav a.active,nav a:hover{color:#ece6d8;}"
+        "main{margin-left:296px;max-width:920px;padding:28px 44px;}"
+        "article{line-height:1.62;}"
+        "h1,h2,h3{color:#f7f0df;letter-spacing:0;}"
+        "code,pre{background:#2a261f;color:#f4d58d;border-radius:4px;}"
+        "code{padding:1px 4px;}pre{padding:14px;overflow:auto;}"
+        "#search{width:100%;box-sizing:border-box;margin-bottom:14px;background:#24211c;color:#"
+        "ece6d8;border:1px solid #4b463d;padding:10px;}"
+        "#results a{display:block;color:#7ddbd4;text-decoration:none;padding:4px 0;}"
+        "@media(max-width:760px){nav{position:static;width:auto;}main{margin-left:0;padding:22px;}}"
+        "\n");
 
     std::ostringstream index;
     index << "const THRYSTR_SEARCH_INDEX=[";
@@ -382,8 +383,7 @@ void emit_site(const std::vector<Page>& pages, const std::filesystem::path& site
         if (i > 0) {
             index << ',';
         }
-        index << "{\"title\":\"" << escape_json(pages[i].title)
-              << "\",\"url\":\"" << pages[i].slug
+        index << "{\"title\":\"" << escape_json(pages[i].title) << "\",\"url\":\"" << pages[i].slug
               << ".html\",\"tokens\":[";
         const std::vector<std::string> tokens =
             tokens_for(pages[i].title + "\n" + pages[i].markdown);
@@ -395,12 +395,15 @@ void emit_site(const std::vector<Page>& pages, const std::filesystem::path& site
         }
         index << "]}";
     }
-    index << "];\n"
-          << "const box=document.getElementById('search');const results=document.getElementById('results');"
-          << "box.addEventListener('input',()=>{const q=box.value.toLowerCase().split(/\\W+/).filter(Boolean);"
-          << "results.innerHTML='';if(!q.length)return;for(const p of THRYSTR_SEARCH_INDEX){"
-          << "if(q.every(t=>p.tokens.includes(t))){const a=document.createElement('a');a.href=p.url;"
-          << "a.textContent=p.title;results.appendChild(a);}}});\n";
+    index
+        << "];\n"
+        << "const box=document.getElementById('search');const "
+           "results=document.getElementById('results');"
+        << "box.addEventListener('input',()=>{const "
+           "q=box.value.toLowerCase().split(/\\W+/).filter(Boolean);"
+        << "results.innerHTML='';if(!q.length)return;for(const p of THRYSTR_SEARCH_INDEX){"
+        << "if(q.every(t=>p.tokens.includes(t))){const a=document.createElement('a');a.href=p.url;"
+        << "a.textContent=p.title;results.appendChild(a);}}});\n";
     write_text(site_dir / "search.js", index.str());
 
     for (const Page& page : pages) {
@@ -411,19 +414,17 @@ void emit_site(const std::vector<Page>& pages, const std::filesystem::path& site
     }
 }
 
-void emit_cpp_resources(const std::vector<Page>& pages,
-                        const std::filesystem::path& cpp_path,
+void emit_cpp_resources(const std::vector<Page>& pages, const std::filesystem::path& cpp_path,
                         const std::filesystem::path& hpp_path) {
-    write_text(hpp_path,
-               "#pragma once\n"
-               "#include <cstddef>\n"
-               "#include <string_view>\n\n"
-               "namespace thrystr::docs {\n"
-               "struct DocPage { std::string_view slug; std::string_view title; "
-               "std::string_view markdown; std::string_view html; };\n"
-               "std::size_t doc_page_count();\n"
-               "const DocPage* doc_pages();\n"
-               "}  // namespace thrystr::docs\n");
+    write_text(hpp_path, "#pragma once\n"
+                         "#include <cstddef>\n"
+                         "#include <string_view>\n\n"
+                         "namespace thrystr::docs {\n"
+                         "struct DocPage { std::string_view slug; std::string_view title; "
+                         "std::string_view markdown; std::string_view html; };\n"
+                         "std::size_t doc_page_count();\n"
+                         "const DocPage* doc_pages();\n"
+                         "}  // namespace thrystr::docs\n");
 
     std::ostringstream cpp;
     cpp << "// !!! GENERATED BY tools/docgen - DO NOT EDIT BY HAND !!!\n"
@@ -432,10 +433,8 @@ void emit_cpp_resources(const std::vector<Page>& pages,
         << "namespace thrystr::docs {\nnamespace {\n"
         << "constexpr std::array<DocPage, " << pages.size() << "> kPages = {{\n";
     for (const Page& page : pages) {
-        cpp << "    {\"" << escape_json(page.slug) << "\", \""
-            << escape_json(page.title) << "\", "
-            << cpp_raw_string(page.markdown) << ", "
-            << cpp_raw_string(page.html) << "},\n";
+        cpp << "    {\"" << escape_json(page.slug) << "\", \"" << escape_json(page.title) << "\", "
+            << cpp_raw_string(page.markdown) << ", " << cpp_raw_string(page.html) << "},\n";
     }
     cpp << "}};\n}  // namespace\n\n"
         << "std::size_t doc_page_count() { return kPages.size(); }\n"
@@ -460,17 +459,16 @@ Args parse_args(int argc, char** argv) {
         read_next(args.cpp_path, "--cpp");
         read_next(args.hpp_path, "--hpp");
     }
-    if (args.input_dir.empty() || args.site_dir.empty() ||
-        args.cpp_path.empty() || args.hpp_path.empty()) {
-        throw std::runtime_error(
-            "usage: thrystr_docgen --input docs/user --site build/docs/site "
-            "--cpp build/generated/docs/docs_resources.cpp "
-            "--hpp build/generated/docs/docs_resources.hpp");
+    if (args.input_dir.empty() || args.site_dir.empty() || args.cpp_path.empty() ||
+        args.hpp_path.empty()) {
+        throw std::runtime_error("usage: thrystr_docgen --input docs/user --site build/docs/site "
+                                 "--cpp build/generated/docs/docs_resources.cpp "
+                                 "--hpp build/generated/docs/docs_resources.hpp");
     }
     return args;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     try {

@@ -104,25 +104,21 @@ double apply_value_mappers(double value, std::span<const ValueMapper> mappers);
 std::uint8_t unsigned_mod_256(double value);
 
 /// Apply mappers to one byte and return the wrapped byte result.
-std::uint8_t map_byte_to_wrapped(std::uint8_t byte,
-                                 std::span<const ValueMapper> mappers = {});
+std::uint8_t map_byte_to_wrapped(std::uint8_t byte, std::span<const ValueMapper> mappers = {});
 
 /// Apply mappers to one byte and convert the result to a scalar in [-1, 1).
-float map_byte_to_scalar(std::uint8_t byte,
-                         std::span<const ValueMapper> mappers = {});
+float map_byte_to_scalar(std::uint8_t byte, std::span<const ValueMapper> mappers = {});
 
 /// Apply mappers to a byte span and return wrapped byte values.
-std::vector<std::uint8_t> map_bytes_to_wrapped(
-    std::span<const std::uint8_t> bytes,
-    std::span<const ValueMapper> mappers = {});
+std::vector<std::uint8_t> map_bytes_to_wrapped(std::span<const std::uint8_t> bytes,
+                                               std::span<const ValueMapper> mappers = {});
 
 /// Convert one byte to the scalar domain using `byte / 128 - 1`.
 float byte_to_scalar(std::uint8_t byte);
 
 /// Convert a byte span to scalar values after applying optional mappers.
-std::vector<float> map_bytes_to_scalars(
-    std::span<const std::uint8_t> bytes,
-    std::span<const ValueMapper> mappers = {});
+std::vector<float> map_bytes_to_scalars(std::span<const std::uint8_t> bytes,
+                                        std::span<const ValueMapper> mappers = {});
 
 /// Compute the absolute difference between two bytes.
 std::uint8_t adjacent_delta(std::uint8_t left, std::uint8_t right);
@@ -131,9 +127,8 @@ std::uint8_t adjacent_delta(std::uint8_t left, std::uint8_t right);
 std::vector<std::uint8_t> adjacent_deltas(std::span<const std::uint8_t> bytes);
 
 /// Find the sliding window with the largest adjacent-byte delta.
-WindowEntropy find_highest_entropy_window(
-    std::span<const std::uint8_t> bytes,
-    std::size_t window_bytes = kDefaultWindowBytes);
+WindowEntropy find_highest_entropy_window(std::span<const std::uint8_t> bytes,
+                                          std::size_t window_bytes = kDefaultWindowBytes);
 
 /// Return the largest absolute adjacent scalar delta.
 float max_abs_scalar_delta(std::span<const float> scalars);
@@ -141,17 +136,14 @@ float max_abs_scalar_delta(std::span<const float> scalars);
 /// Compute an X scale such that adjacent slopes do not exceed `max_slope`.
 ///
 /// @throws std::invalid_argument if `max_slope` is not positive.
-float compute_x_scale(std::span<const float> scalars,
-                      float max_slope = kDefaultMaxSlope);
+float compute_x_scale(std::span<const float> scalars, float max_slope = kDefaultMaxSlope);
 
 /// Fit either a sine or cosine phase against sampled scalar data.
 ///
 /// @throws std::invalid_argument if `wave_scale` is not positive and finite.
-PhaseFit fit_wave_phase(std::span<const float> scalars,
-                        bool cosine,
+PhaseFit fit_wave_phase(std::span<const float> scalars, bool cosine,
                         double wave_scale = kDefaultWaveScale,
-                        double tolerance = kDefaultWaveTolerance,
-                        int phase_steps = 720,
+                        double tolerance = kDefaultWaveTolerance, int phase_steps = 720,
                         std::size_t max_test_points = 65536);
 
 /// Read an entire file into memory.
@@ -165,11 +157,9 @@ std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path);
 /// @throws std::invalid_argument for invalid mapper or fit parameters.
 Analysis analyze_file(const std::filesystem::path& path,
                       std::size_t window_bytes = kDefaultWindowBytes,
-                      float max_slope = kDefaultMaxSlope,
-                      double wave_scale = kDefaultWaveScale,
-                      double wave_tolerance = kDefaultWaveTolerance,
-                      int phase_steps = 720,
+                      float max_slope = kDefaultMaxSlope, double wave_scale = kDefaultWaveScale,
+                      double wave_tolerance = kDefaultWaveTolerance, int phase_steps = 720,
                       std::size_t max_phase_test_points = 65536,
                       std::span<const ValueMapper> mappers = {});
 
-}  // namespace thrystr
+} // namespace thrystr

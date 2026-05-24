@@ -18,8 +18,7 @@ bool cancelled(const MultiTrackOptions& options) {
 
 std::uint8_t scalar_to_byte(float value) {
     const double scaled = (static_cast<double>(value) + 1.0) * 128.0;
-    return static_cast<std::uint8_t>(
-        std::clamp(std::llround(scaled), 0ll, 255ll));
+    return static_cast<std::uint8_t>(std::clamp(std::llround(scaled), 0ll, 255ll));
 }
 
 std::size_t count_track_sections(const WorkspaceModel& workspace) {
@@ -30,9 +29,7 @@ std::size_t count_track_sections(const WorkspaceModel& workspace) {
     return count;
 }
 
-Section constant_section(std::size_t start,
-                         std::size_t length,
-                         double value,
+Section constant_section(std::size_t start, std::size_t length, double value,
                          const MultiTrackOptions& options) {
     Section section;
     section.start_index = static_cast<std::uint32_t>(start);
@@ -45,9 +42,7 @@ Section constant_section(std::size_t start,
     return section;
 }
 
-Section two_owned_section(std::span<const float> scalars,
-                          std::size_t first,
-                          std::size_t second,
+Section two_owned_section(std::span<const float> scalars, std::size_t first, std::size_t second,
                           const MultiTrackOptions& options) {
     const double first_value = static_cast<double>(scalars[first]);
     const double second_value = static_cast<double>(scalars[second]);
@@ -63,17 +58,15 @@ Section two_owned_section(std::span<const float> scalars,
     section.wave_wavelength_nm = distance * 2.0;
     section.wave_amplitude = high - low;
     section.wave_amplitude_offset = low;
-    section.wave_phase_nm = first_value <= second_value
-        ? section.wave_wavelength_nm * 0.25
-        : -section.wave_wavelength_nm * 0.25;
+    section.wave_phase_nm = first_value <= second_value ? section.wave_wavelength_nm * 0.25
+                                                        : -section.wave_wavelength_nm * 0.25;
     section.fit_tolerance = options.tolerance;
     section.max_residual = 0.0;
     section.mean_residual = 0.0;
     return section;
 }
 
-std::vector<std::uint8_t> most_frequent_bytes(std::span<const float> scalars,
-                                              std::size_t limit) {
+std::vector<std::uint8_t> most_frequent_bytes(std::span<const float> scalars, std::size_t limit) {
     std::array<std::size_t, 256> counts{};
     for (float value : scalars) {
         ++counts[scalar_to_byte(value)];
@@ -118,8 +111,7 @@ std::vector<std::uint8_t> bucket_partition(std::span<const float> scalars,
     return partition;
 }
 
-std::vector<std::uint8_t> index_mod_partition(std::size_t sample_count,
-                                              std::uint8_t track_count) {
+std::vector<std::uint8_t> index_mod_partition(std::size_t sample_count, std::uint8_t track_count) {
     std::vector<std::uint8_t> partition(sample_count, 0u);
     for (std::size_t i = 0; i < sample_count; ++i) {
         partition[i] = static_cast<std::uint8_t>(i % track_count);
@@ -128,10 +120,8 @@ std::vector<std::uint8_t> index_mod_partition(std::size_t sample_count,
 }
 
 Section sparse_section_for_owned_range(std::span<const float> scalars,
-                                       std::span<const std::uint8_t> mask,
-                                       std::size_t first,
-                                       std::size_t last,
-                                       const MultiTrackOptions& options) {
+                                       std::span<const std::uint8_t> mask, std::size_t first,
+                                       std::size_t last, const MultiTrackOptions& options) {
     std::vector<std::size_t> owned;
     owned.reserve(last - first + 1u);
     double low = std::numeric_limits<double>::infinity();
@@ -178,10 +168,8 @@ std::vector<Section> fit_sparse_track_sections(std::span<const float> scalars,
         }
 
         const std::size_t max_length = std::max<std::size_t>(1u, options.max_section_length);
-        const std::size_t max_last =
-            std::min(sample_count - 1u, index + max_length - 1u);
-        Section section = sparse_section_for_owned_range(
-            scalars, mask, index, max_last, options);
+        const std::size_t max_last = std::min(sample_count - 1u, index + max_length - 1u);
+        Section section = sparse_section_for_owned_range(scalars, mask, index, max_last, options);
         if (section.length == 0u) {
             section = constant_section(index, 1u, scalars[index], options);
         }
@@ -201,10 +189,7 @@ std::vector<Section> fit_parity_sections(std::span<const std::uint8_t> partition
         while (end < partition.size() && partition[end] == value) {
             ++end;
         }
-        Section section = constant_section(start,
-                                           end - start,
-                                           static_cast<double>(value),
-                                           options);
+        Section section = constant_section(start, end - start, static_cast<double>(value), options);
         section.fit_tolerance = std::max(1.0e-12, 0.5 - options.parity_margin);
         sections.push_back(section);
         start = end;
@@ -268,17 +253,15 @@ WorkspaceModel workspace_from_partition(std::span<const float> scalars,
     return workspace;
 }
 
-bool candidate_is_better(std::size_t candidate_cost,
-                         std::size_t candidate_sections,
-                         std::size_t best_cost,
-                         std::size_t best_sections) {
+bool candidate_is_better(std::size_t candidate_cost, std::size_t candidate_sections,
+                         std::size_t best_cost, std::size_t best_sections) {
     if (candidate_cost != best_cost) {
         return candidate_cost < best_cost;
     }
     return candidate_sections < best_sections;
 }
 
-}  // namespace
+} // namespace
 
 std::uint8_t parity_owner_at(const WorkspaceModel& workspace, std::size_t index) {
     if (workspace.parity_track_id == kNoParityTrack) {
@@ -294,8 +277,7 @@ std::uint8_t parity_owner_at(const WorkspaceModel& workspace, std::size_t index)
         }
         const double value = wave_value_at_index(section, index);
         return static_cast<std::uint8_t>(
-            std::clamp(std::llround(value), 0ll,
-                       static_cast<long long>(kMaxDataTracks - 1u)));
+            std::clamp(std::llround(value), 0ll, static_cast<long long>(kMaxDataTracks - 1u)));
     }
     return kNoParityTrack;
 }
@@ -303,8 +285,7 @@ std::uint8_t parity_owner_at(const WorkspaceModel& workspace, std::size_t index)
 double reconstructed_value_at(const WorkspaceModel& workspace, std::size_t index) {
     const std::uint8_t owner = parity_owner_at(workspace, index);
     const Track* track = find_track(workspace, owner);
-    if (!track || track->kind != TrackKind::Data ||
-        !get_owned_bit(track->owned_mask, index)) {
+    if (!track || track->kind != TrackKind::Data || !get_owned_bit(track->owned_mask, index)) {
         return 0.0;
     }
     for (const Section& section : track->sections) {
@@ -315,16 +296,15 @@ double reconstructed_value_at(const WorkspaceModel& workspace, std::size_t index
     return 0.0;
 }
 
-MultiTrackFitResult fit_multi_track_sections(
-    std::span<const float> scalars,
-    const MultiTrackOptions& options) {
+MultiTrackFitResult fit_multi_track_sections(std::span<const float> scalars,
+                                             const MultiTrackOptions& options) {
     MultiTrackFitResult result;
     if (scalars.empty()) {
         return result;
     }
 
-    result.workspace = make_single_track_workspace(
-        scalars, options, &result.single_track_section_count);
+    result.workspace =
+        make_single_track_workspace(scalars, options, &result.single_track_section_count);
     result.total_section_count = result.single_track_section_count;
     if (cancelled(options)) {
         result.cancelled = true;
@@ -332,17 +312,16 @@ MultiTrackFitResult fit_multi_track_sections(
     }
 
     std::size_t best_cost = options.allow_single_track_fallback
-        ? result.single_track_section_count
-        : std::numeric_limits<std::size_t>::max();
+                                ? result.single_track_section_count
+                                : std::numeric_limits<std::size_t>::max();
     std::size_t best_sections = options.allow_single_track_fallback
-        ? result.single_track_section_count
-        : std::numeric_limits<std::size_t>::max();
+                                    ? result.single_track_section_count
+                                    : std::numeric_limits<std::size_t>::max();
     const std::uint8_t min_tracks =
         std::clamp(options.min_data_tracks, static_cast<std::uint8_t>(2u),
                    static_cast<std::uint8_t>(kMaxDataTracks));
     const std::uint8_t max_tracks =
-        std::clamp(options.max_data_tracks, min_tracks,
-                   static_cast<std::uint8_t>(kMaxDataTracks));
+        std::clamp(options.max_data_tracks, min_tracks, static_cast<std::uint8_t>(kMaxDataTracks));
 
     for (std::uint8_t k = min_tracks; k <= max_tracks; ++k) {
         const std::array<std::vector<std::uint8_t>, 3> partitions = {
@@ -370,12 +349,12 @@ MultiTrackFitResult fit_multi_track_sections(
     }
 
     if (options.allow_single_track_fallback && best_cost >= result.single_track_section_count) {
-        result.workspace = make_single_track_workspace(
-            scalars, options, &result.single_track_section_count);
+        result.workspace =
+            make_single_track_workspace(scalars, options, &result.single_track_section_count);
         result.total_section_count = result.single_track_section_count;
         result.used_parity = false;
     }
     return result;
 }
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

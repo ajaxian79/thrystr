@@ -24,18 +24,14 @@ double wave_value_at_index(const Section& section, std::size_t index) {
 
     const double spacing = std::max(1.0e-12, section.section_spacing_nm);
     const double wavelength = std::max(1.0e-12, section.wave_wavelength_nm);
-    const double local_index = static_cast<double>(
-        index >= section.start_index ? index - section.start_index : 0u);
+    const double local_index =
+        static_cast<double>(index >= section.start_index ? index - section.start_index : 0u);
     const double x_nm = local_index * spacing;
-    const double theta = 2.0 * std::numbers::pi *
-                         (x_nm - section.wave_phase_nm) / wavelength;
-    return section.wave_amplitude_offset +
-           section.wave_amplitude * ((std::sin(theta) + 1.0) * 0.5);
+    const double theta = 2.0 * std::numbers::pi * (x_nm - section.wave_phase_nm) / wavelength;
+    return section.wave_amplitude_offset + section.wave_amplitude * ((std::sin(theta) + 1.0) * 0.5);
 }
 
-std::size_t owned_mask_size(std::size_t sample_count) {
-    return (sample_count + 7u) / 8u;
-}
+std::size_t owned_mask_size(std::size_t sample_count) { return (sample_count + 7u) / 8u; }
 
 void reset_owned_mask(std::vector<std::uint8_t>& mask, std::size_t sample_count) {
     mask.assign(owned_mask_size(sample_count), 0u);
@@ -71,8 +67,7 @@ std::size_t popcount_owned(std::span<const std::uint8_t> mask) {
     return count;
 }
 
-std::size_t first_owned_index(std::span<const std::uint8_t> mask,
-                              std::size_t sample_count) {
+std::size_t first_owned_index(std::span<const std::uint8_t> mask, std::size_t sample_count) {
     for (std::size_t index = 0; index < sample_count; ++index) {
         if (get_owned_bit(mask, index)) {
             return index;
@@ -109,21 +104,15 @@ Section& append_section(Track& track, const Section& section) {
 }
 
 Track* find_track(WorkspaceModel& workspace, std::uint8_t id) {
-    const auto found = std::find_if(workspace.tracks.begin(),
-                                    workspace.tracks.end(),
-                                    [id](const Track& track) {
-                                        return track.id == id;
-                                    });
+    const auto found = std::find_if(workspace.tracks.begin(), workspace.tracks.end(),
+                                    [id](const Track& track) { return track.id == id; });
     return found == workspace.tracks.end() ? nullptr : &*found;
 }
 
 const Track* find_track(const WorkspaceModel& workspace, std::uint8_t id) {
-    const auto found = std::find_if(workspace.tracks.begin(),
-                                    workspace.tracks.end(),
-                                    [id](const Track& track) {
-                                        return track.id == id;
-                                    });
+    const auto found = std::find_if(workspace.tracks.begin(), workspace.tracks.end(),
+                                    [id](const Track& track) { return track.id == id; });
     return found == workspace.tracks.end() ? nullptr : &*found;
 }
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

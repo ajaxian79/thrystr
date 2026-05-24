@@ -78,8 +78,7 @@ void set_owned_bit(std::span<std::uint8_t> mask, std::size_t index, bool value);
 std::size_t popcount_owned(std::span<const std::uint8_t> mask);
 
 /// Return the first set bit, or `sample_count` when the mask is empty.
-std::size_t first_owned_index(std::span<const std::uint8_t> mask,
-                              std::size_t sample_count);
+std::size_t first_owned_index(std::span<const std::uint8_t> mask, std::size_t sample_count);
 
 /// Return one-past the last set bit, or zero when the mask is empty.
 std::size_t last_owned_index_exclusive(std::span<const std::uint8_t> mask,
@@ -97,4 +96,4 @@ Track* find_track(WorkspaceModel& workspace, std::uint8_t id);
 /// Find a track by stable id.
 const Track* find_track(const WorkspaceModel& workspace, std::uint8_t id);
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

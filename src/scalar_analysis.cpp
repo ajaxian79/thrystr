@@ -559,18 +559,18 @@ PhaseFit fit_wave_phase(std::span<const float> scalars,
 }
 
 std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    const std::size_t size = file_size_or_throw(path);
+
+    std::ifstream input(path, std::ios::binary);
     if (!input) {
         throw std::runtime_error("could not open file: " + path.string());
     }
 
-    const std::streamsize size = input.tellg();
-    if (size < 0) {
-        throw std::runtime_error("could not determine file size: " + path.string());
+    if (size > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+        throw std::runtime_error("file too large for stream read: " + path.string());
     }
 
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    input.seekg(0, std::ios::beg);
+    std::vector<std::uint8_t> bytes(size);
     if (!bytes.empty() &&
         !input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
         throw std::runtime_error("could not read file: " + path.string());

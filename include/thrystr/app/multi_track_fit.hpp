@@ -40,8 +40,7 @@ std::uint8_t parity_owner_at(const WorkspaceModel& workspace, std::size_t index)
 double reconstructed_value_at(const WorkspaceModel& workspace, std::size_t index);
 
 /// Fit a workspace and choose multi-track only when it beats single-track cost.
-MultiTrackFitResult fit_multi_track_sections(
-    std::span<const float> scalars,
-    const MultiTrackOptions& options = {});
+MultiTrackFitResult fit_multi_track_sections(std::span<const float> scalars,
+                                             const MultiTrackOptions& options = {});
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

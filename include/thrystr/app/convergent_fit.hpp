@@ -29,14 +29,11 @@ struct ConvergentFitResult {
 };
 
 /// Fit one section over `[start, start + length)`.
-Section fit_section(std::span<const float> scalars,
-                    std::size_t start,
-                    std::size_t length,
+Section fit_section(std::span<const float> scalars, std::size_t start, std::size_t length,
                     const ConvergentFitOptions& options = {});
 
 /// Greedily tile the scalar series with fitted sections.
-ConvergentFitResult fit_convergent_sections(
-    std::span<const float> scalars,
-    const ConvergentFitOptions& options = {});
+ConvergentFitResult fit_convergent_sections(std::span<const float> scalars,
+                                            const ConvergentFitOptions& options = {});
 
-}  // namespace thrystr::app
+} // namespace thrystr::app

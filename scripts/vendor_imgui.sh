@@ -38,4 +38,4 @@ cp \
 {
     git -C "${source_dir}" describe --tags --always 2>/dev/null || echo "unknown"
     git -C "${source_dir}" rev-parse HEAD 2>/dev/null || echo "unknown"
-} > "${dest}/VERSION"
+} > "${dest}/IMGUI_VERSION.txt"
