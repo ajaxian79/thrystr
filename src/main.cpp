@@ -17,6 +17,9 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <skald/skald.h>
+#if defined(THRYSTR_HAS_DOCS)
+#include "docs_resources.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -275,6 +278,7 @@ struct AppState {
     bool show_inspector_overlay = false;
     bool show_reconstruction_only = false;
     bool show_fit_validation = false;
+    bool show_docs = false;
     bool request_close = false;
     ChromeAction chrome_action = ChromeAction::None;
     double chrome_start_global_x = 0.0;
@@ -309,6 +313,8 @@ struct AppState {
     char custom_playback_speed_text[32] = "60";
     bool xline_playing = false;
     bool playhead_dragging = false;
+    int docs_page = 0;
+    char docs_search[128] = {};
     std::optional<std::size_t> pending_scroll_index;
     skald::FileDialogState file_dialog{};
     std::vector<FileBrowserEntry> file_dialog_rows;
@@ -2667,6 +2673,11 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     }
 
     ImGui::SameLine();
+    if (skald::GhostButton("Help", ImVec2(58.0f, 0.0f))) {
+        state.show_docs = true;
+    }
+
+    ImGui::SameLine();
     const std::string source_name = state.path[0] == '\0'
         ? std::string("source: none")
         : std::string("source: ") + std::filesystem::path(state.path).filename().string();
@@ -4357,8 +4368,131 @@ void draw_file_dialog(AppState& state) {
     state.active_dialog = DialogPurpose::None;
 }
 
+std::string lowercase_ascii(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char ch : text) {
+        out.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+bool text_matches_query(std::string_view title,
+                        std::string_view body,
+                        std::string_view query) {
+    const std::string needle = lowercase_ascii(query);
+    if (needle.empty()) {
+        return true;
+    }
+    const std::string haystack = lowercase_ascii(
+        std::string(title) + "\n" + std::string(body));
+    return haystack.find(needle) != std::string::npos;
+}
+
+void draw_markdown_body(std::string_view markdown, const skald::Fonts& fonts) {
+    std::string line;
+    const auto flush_line = [&](std::string_view text) {
+        if (text.rfind("### ", 0) == 0 ||
+            text.rfind("## ", 0) == 0 ||
+            text.rfind("# ", 0) == 0) {
+            const std::size_t offset = text.rfind("### ", 0) == 0
+                ? 4u
+                : text.rfind("## ", 0) == 0 ? 3u : 2u;
+            if (fonts.sans_md) {
+                ImGui::PushFont(fonts.sans_md);
+            }
+            ImGui::TextWrapped("%.*s",
+                               static_cast<int>(text.size() - offset),
+                               text.data() + offset);
+            if (fonts.sans_md) {
+                ImGui::PopFont();
+            }
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
+            return;
+        }
+        if (text.rfind("- ", 0) == 0) {
+            ImGui::BulletText("%.*s",
+                              static_cast<int>(text.size() - 2u),
+                              text.data() + 2u);
+            return;
+        }
+        if (!text.empty()) {
+            ImGui::TextWrapped("%.*s",
+                               static_cast<int>(text.size()),
+                               text.data());
+        } else {
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        }
+    };
+
+    for (char ch : markdown) {
+        if (ch == '\n') {
+            flush_line(line);
+            line.clear();
+        } else if (ch != '\r') {
+            line.push_back(ch);
+        }
+    }
+    if (!line.empty()) {
+        flush_line(line);
+    }
+}
+
+void draw_docs_panel(AppState& state) {
+    if (!state.show_docs) {
+        return;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(820.0f, 560.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Docs", &state.show_docs, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
+
+#if defined(THRYSTR_HAS_DOCS)
+    const auto* pages = thrystr::docs::doc_pages();
+    const std::size_t page_count = thrystr::docs::doc_page_count();
+    if (page_count == 0u || pages == nullptr) {
+        skald::KvRowStatus("manual", "not generated", skald::BadgeTone::Warning);
+        ImGui::End();
+        return;
+    }
+
+    state.docs_page = std::clamp(state.docs_page, 0, static_cast<int>(page_count - 1u));
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputText("##docs_search", state.docs_search, sizeof(state.docs_search));
+
+    const float nav_width = 220.0f;
+    ImGui::BeginChild("##docs_nav", ImVec2(nav_width, 0.0f), true);
+    for (std::size_t i = 0; i < page_count; ++i) {
+        if (!text_matches_query(pages[i].title, pages[i].markdown, state.docs_search)) {
+            continue;
+        }
+        if (ImGui::Selectable(pages[i].title.data(),
+                              state.docs_page == static_cast<int>(i))) {
+            state.docs_page = static_cast<int>(i);
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+    ImGui::BeginChild("##docs_body", ImVec2(0.0f, 0.0f), true);
+    draw_markdown_body(pages[static_cast<std::size_t>(state.docs_page)].markdown,
+                       state.fonts);
+    ImGui::EndChild();
+#else
+    skald::KvRowStatus("manual", "not built", skald::BadgeTone::Warning);
+#endif
+
+    ImGui::End();
+}
+
 void handle_shortcuts(AppState& state) {
     ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) {
+        state.show_docs = !state.show_docs;
+    }
     if (io.WantTextInput ||
         state.active_dialog != DialogPurpose::None ||
         state.pending_dialog != DialogPurpose::None) {
@@ -4394,6 +4528,7 @@ void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors)
     draw_inspector_overlay(state);
     draw_settings_dialog(state);
     draw_fit_validation_overlay(state);
+    draw_docs_panel(state);
     draw_file_dialog(state);
     handle_custom_chrome(state, window, cursors);
 }

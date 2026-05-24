@@ -151,6 +151,16 @@ if(THRYSTR_BUILD_DOCS)
         VERBATIM)
     add_custom_target(thrystr_docs ALL
         DEPENDS "${THRYSTR_DOCS_CPP}" "${THRYSTR_DOCS_HPP}")
+    add_library(thrystr_docs_resources STATIC
+        "${THRYSTR_DOCS_CPP}")
+    target_include_directories(thrystr_docs_resources PUBLIC
+        "${THRYSTR_GENERATED_DOCS_DIR}")
+    add_dependencies(thrystr_docs_resources thrystr_docs)
+    if(TARGET thrystr)
+        add_dependencies(thrystr thrystr_docs)
+        target_link_libraries(thrystr PRIVATE thrystr_docs_resources)
+        target_compile_definitions(thrystr PRIVATE THRYSTR_HAS_DOCS=1)
+    endif()
 endif()
 
 if(THRYSTR_BUILD_TESTS)
