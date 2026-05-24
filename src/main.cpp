@@ -40,6 +40,11 @@ constexpr float kTopChromeHeight = 44.0f;
 constexpr double kChromeResizeMargin = 8.0;
 constexpr int kMinWindowWidth = 760;
 constexpr int kMinWindowHeight = 460;
+constexpr std::size_t kWaveFitMaxSamples = 4096;
+constexpr int kWaveFitWavelengthSteps = 144;
+constexpr int kWaveFitPhaseSteps = 128;
+constexpr std::size_t kMaxWaveWavelengthModifiers = 16;
+constexpr int kWaveModifierWavelengthSteps = 41;
 constexpr std::uintmax_t kLargeSourcePhaseFitDeferBytes = 128ull * 1024ull * 1024ull;
 constexpr const char* kOpenFileDialogId = "##open_file_dialog";
 constexpr const char* kWaveSettingsExtension = ".thryw";
@@ -83,6 +88,14 @@ struct Segment {
     bool active = false;
     std::size_t selection_start = 0;
     std::size_t selection_end = 0;
+};
+
+struct WaveFitResult {
+    double wavelength_nm = 64.0;
+    double phase_nm = 0.0;
+    std::size_t hits = 0;
+    std::size_t tested = 0;
+    double mean_error = 0.0;
 };
 
 struct Args {
@@ -783,6 +796,25 @@ std::pair<std::size_t, std::size_t> normalized_selection(const AppState& state) 
     };
 }
 
+std::pair<std::size_t, std::size_t> analysis_selection_bounds(const AppState& state) {
+    if (!state.analysis || state.analysis->scalars.empty()) {
+        return {0u, 0u};
+    }
+    if (!state.segment.active) {
+        return {0u, state.analysis->scalars.size() - 1u};
+    }
+    const auto [first, last] = normalized_selection(state);
+    return {
+        std::min(first, state.analysis->scalars.size() - 1u),
+        std::min(last, state.analysis->scalars.size() - 1u),
+    };
+}
+
+std::size_t fit_sample_stride(std::size_t first, std::size_t last) {
+    const std::size_t count = last >= first ? last - first + 1u : 0u;
+    return std::max<std::size_t>(1u, count / kWaveFitMaxSamples);
+}
+
 void sync_entity_name(AppState& state) {
     if (state.entity_name_id == state.selected_entity_id) {
         return;
@@ -861,70 +893,104 @@ void create_section(AppState& state) {
     state.status = "Created x-line section";
 }
 
-double wave_value_at_nm(const WaveEntity& wave, double x_nm) {
+double wave_wavelength_at_nm(const WaveEntity& wave, double x_nm) {
     double wavelength = std::max(0.000001, wave.wavelength_nm);
     for (const auto& modifier : wave.wavelength_modifiers) {
         if (x_nm >= modifier.first) {
             wavelength = std::max(0.000001, wavelength + modifier.second);
         }
     }
+    return wavelength;
+}
+
+double wave_value_at_nm(const WaveEntity& wave, double x_nm) {
+    const double wavelength = wave_wavelength_at_nm(wave, x_nm);
     const double theta = 2.0 * kPi * (x_nm - wave.phase_nm) / wavelength;
     return wave.amplitude_offset + wave.amplitude * ((std::sin(theta) + 1.0) * 0.5);
 }
 
-std::pair<double, double> fit_wave_to_selection(const AppState& state) {
+WaveFitResult score_wave_on_range(const AppState& state,
+                                  const WaveEntity& wave,
+                                  std::size_t first,
+                                  std::size_t last) {
+    WaveFitResult score;
+    score.wavelength_nm = wave.wavelength_nm;
+    score.phase_nm = wave.phase_nm;
+    if (!state.analysis || state.analysis->scalars.empty() || last < first) {
+        return score;
+    }
+
+    const double period = data_spatial_period_nm(state);
+    const double tolerance = std::max(0.000001, static_cast<double>(state.wave_tolerance));
+    const std::size_t stride = fit_sample_stride(first, last);
+    double error = 0.0;
+    for (std::size_t index = first; index <= last && index < state.analysis->scalars.size();
+         index += stride) {
+        const double x_nm = static_cast<double>(index) * period;
+        const double sample_error =
+            std::abs(wave_value_at_nm(wave, x_nm) - state.analysis->scalars[index]);
+        if (sample_error <= tolerance) {
+            ++score.hits;
+        }
+        error += sample_error;
+        ++score.tested;
+    }
+    score.mean_error = score.tested == 0 ? 0.0 : error / static_cast<double>(score.tested);
+    return score;
+}
+
+bool wave_fit_is_better(const WaveFitResult& candidate, const WaveFitResult& best) {
+    if (candidate.hits != best.hits) {
+        return candidate.hits > best.hits;
+    }
+    return candidate.mean_error < best.mean_error;
+}
+
+double log_lerp(double low, double high, double t) {
+    low = std::max(0.000001, low);
+    high = std::max(low, high);
+    return std::exp(std::log(low) + (std::log(high) - std::log(low)) * t);
+}
+
+WaveFitResult fit_wave_to_selection(const AppState& state, const WaveEntity& base_wave) {
     if (!state.analysis || state.analysis->scalars.size() < 2) {
         return {64.0, 0.0};
     }
 
-    const std::size_t first = state.segment.active
-        ? std::min(state.segment.selection_start, state.segment.selection_end)
-        : 0u;
-    const std::size_t last = state.segment.active
-        ? std::max(state.segment.selection_start, state.segment.selection_end)
-        : state.analysis->scalars.size() - 1u;
+    const auto [first, last] = analysis_selection_bounds(state);
     const double period = data_spatial_period_nm(state);
     const double span_nm = std::max(period, static_cast<double>(last - first + 1u) * period);
-    const double min_wavelength = std::max(period * 2.0, span_nm / 64.0);
-    const double max_wavelength = std::max(min_wavelength, span_nm * 2.0);
-    const int wavelength_steps = 96;
-    const int phase_steps = 96;
+    const double base_wavelength = std::max(0.000001, base_wave.wavelength_nm);
+    const double min_wavelength =
+        std::max(0.000001, std::min({period, base_wavelength, span_nm}) / 64.0);
+    const double max_wavelength =
+        std::max({min_wavelength * 2.0, period * 256.0, base_wavelength * 64.0, span_nm * 2.0});
 
-    double best_score = -1.0;
-    double best_wavelength = min_wavelength;
-    double best_phase = 0.0;
+    WaveFitResult best;
+    best.mean_error = DBL_MAX;
 
-    for (int wi = 0; wi < wavelength_steps; ++wi) {
-        const double t = wavelength_steps > 1
-            ? static_cast<double>(wi) / static_cast<double>(wavelength_steps - 1)
+    for (int wi = 0; wi < kWaveFitWavelengthSteps; ++wi) {
+        const double t = kWaveFitWavelengthSteps > 1
+            ? static_cast<double>(wi) / static_cast<double>(kWaveFitWavelengthSteps - 1)
             : 0.0;
-        const double wavelength = min_wavelength + (max_wavelength - min_wavelength) * t;
-        for (int pi = 0; pi < phase_steps; ++pi) {
+        const double wavelength = log_lerp(min_wavelength, max_wavelength, t);
+        for (int pi = 0; pi < kWaveFitPhaseSteps; ++pi) {
             const double phase_nm = wavelength * static_cast<double>(pi) /
-                                    static_cast<double>(phase_steps);
-            double error = 0.0;
-            std::size_t samples = 0;
-            const std::size_t stride = std::max<std::size_t>(1, (last - first + 1u) / 2048u);
-            WaveEntity candidate;
+                                    static_cast<double>(kWaveFitPhaseSteps);
+            WaveEntity candidate = base_wave;
             candidate.wavelength_nm = wavelength;
             candidate.phase_nm = phase_nm;
-            for (std::size_t index = first; index <= last && index < state.analysis->scalars.size();
-                 index += stride) {
-                const double x_nm = static_cast<double>(index) * period;
-                const double wave_value = wave_value_at_nm(candidate, x_nm);
-                error += std::abs(wave_value - state.analysis->scalars[index]);
-                ++samples;
-            }
-            const double score = samples == 0 ? 0.0 : 1.0 / (1.0 + error / samples);
-            if (score > best_score) {
-                best_score = score;
-                best_wavelength = wavelength;
-                best_phase = phase_nm;
+            candidate.wavelength_modifiers.clear();
+            WaveFitResult score = score_wave_on_range(state, candidate, first, last);
+            score.wavelength_nm = wavelength;
+            score.phase_nm = phase_nm;
+            if (wave_fit_is_better(score, best)) {
+                best = score;
             }
         }
     }
 
-    return {best_wavelength, best_phase};
+    return best;
 }
 
 void rebuild_wavelength_modifiers(const AppState& state, WaveEntity& wave) {
@@ -933,39 +999,62 @@ void rebuild_wavelength_modifiers(const AppState& state, WaveEntity& wave) {
         return;
     }
 
-    const std::size_t first = state.segment.active
-        ? std::min(state.segment.selection_start, state.segment.selection_end)
-        : 0u;
-    const std::size_t last = state.segment.active
-        ? std::max(state.segment.selection_start, state.segment.selection_end)
-        : state.analysis->scalars.size() - 1u;
+    const auto [first, last] = analysis_selection_bounds(state);
     const double period = data_spatial_period_nm(state);
-    const double tolerance = std::max(0.01, static_cast<double>(state.wave_tolerance));
-    const std::size_t stride = std::max<std::size_t>(1, (last - first + 1u) / 192u);
-    const double max_delta = std::max(period, std::abs(wave.wavelength_nm) * 0.25);
+    const std::size_t count = last - first + 1u;
+    const std::size_t segments =
+        std::min<std::size_t>(kMaxWaveWavelengthModifiers, std::max<std::size_t>(1u, count));
 
-    for (std::size_t index = first; index <= last && index < state.analysis->scalars.size();
-         index += stride) {
-        const double x_nm = static_cast<double>(index) * period;
-        const double residual = state.analysis->scalars[index] - wave_value_at_nm(wave, x_nm);
-        if (std::abs(residual) <= tolerance) {
+    for (std::size_t segment = 0; segment < segments; ++segment) {
+        const std::size_t segment_first = first + (count * segment) / segments;
+        const std::size_t segment_last =
+            first + (count * (segment + 1u)) / segments - 1u;
+        if (segment_last < segment_first) {
             continue;
         }
-        const double delta_nm = std::clamp(residual * period, -max_delta, max_delta);
-        wave.wavelength_modifiers.push_back({x_nm, delta_nm});
-        if (wave.wavelength_modifiers.size() >= 256u) {
-            break;
+
+        const double key_nm = static_cast<double>(segment_first) * period;
+        const double current_wavelength = wave_wavelength_at_nm(wave, key_nm);
+        WaveFitResult best = score_wave_on_range(state, wave, segment_first, segment_last);
+        double best_target = current_wavelength;
+        const double min_target = std::max(0.000001, current_wavelength * 0.5);
+        const double max_target = std::max(min_target * 1.01, current_wavelength * 1.5);
+
+        for (int step = 0; step < kWaveModifierWavelengthSteps; ++step) {
+            const double t = kWaveModifierWavelengthSteps > 1
+                ? static_cast<double>(step) / static_cast<double>(kWaveModifierWavelengthSteps - 1)
+                : 0.0;
+            const double target = log_lerp(min_target, max_target, t);
+            WaveEntity candidate = wave;
+            candidate.wavelength_modifiers.push_back({key_nm, target - current_wavelength});
+            WaveFitResult score =
+                score_wave_on_range(state, candidate, segment_first, segment_last);
+            if (wave_fit_is_better(score, best)) {
+                best = score;
+                best_target = target;
+            }
+        }
+
+        const double delta_nm = best_target - current_wavelength;
+        if (std::abs(delta_nm) > std::max(0.000001, current_wavelength * 0.001)) {
+            wave.wavelength_modifiers.push_back({key_nm, delta_nm});
         }
     }
 }
 
 void create_interpolated_wave(AppState& state) {
     Entity& wave = create_wave_entity(state, "interpolated " + std::to_string(state.wave_serial++));
-    const auto [wavelength_nm, phase_nm] = fit_wave_to_selection(state);
-    wave.wave.wavelength_nm = wavelength_nm;
-    wave.wave.phase_nm = phase_nm;
+    const WaveFitResult fit = fit_wave_to_selection(state, wave.wave);
+    wave.wave.wavelength_nm = fit.wavelength_nm;
+    wave.wave.phase_nm = fit.phase_nm;
     rebuild_wavelength_modifiers(state, wave.wave);
-    state.status = "Created interpolated wave";
+    const WaveFitResult final_fit = score_wave_on_range(
+        state, wave.wave, analysis_selection_bounds(state).first,
+        analysis_selection_bounds(state).second);
+    state.status = "Created interpolated wave: " +
+                   format_count(final_fit.hits) + "/" +
+                   format_count(final_fit.tested) + " hits, " +
+                   format_count(wave.wave.wavelength_modifiers.size()) + " wavelength keys";
 }
 
 void load_path(AppState& state);
@@ -1895,11 +1984,18 @@ void draw_entity_toolbox(AppState& state) {
         skald::KvRow("modifiers", "%s",
                      format_count(selected->wave.wavelength_modifiers.size()).c_str());
         if (skald::GhostButton("Fit Selection", ImVec2(124.0f, 0.0f))) {
-            const auto [wavelength_nm, phase_nm] = fit_wave_to_selection(state);
-            selected->wave.wavelength_nm = wavelength_nm;
-            selected->wave.phase_nm = phase_nm;
+            const WaveFitResult fit = fit_wave_to_selection(state, selected->wave);
+            selected->wave.wavelength_nm = fit.wavelength_nm;
+            selected->wave.phase_nm = fit.phase_nm;
             rebuild_wavelength_modifiers(state, selected->wave);
-            state.status = "Fitted " + selected->name + " to selection";
+            const auto [first, last] = analysis_selection_bounds(state);
+            const WaveFitResult final_fit =
+                score_wave_on_range(state, selected->wave, first, last);
+            state.status = "Fitted " + selected->name + ": " +
+                           format_count(final_fit.hits) + "/" +
+                           format_count(final_fit.tested) + " hits, " +
+                           format_count(selected->wave.wavelength_modifiers.size()) +
+                           " wavelength keys";
         }
     }
 
