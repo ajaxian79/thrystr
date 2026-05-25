@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(thrystr
     VERSION 0.1.0
     LANGUAGES CXX
-    DESCRIPTION "Skald/OpenGL/ImGui scalar entropy waveform explorer")
+    DESCRIPTION "OpenGL scalar entropy waveform explorer")
 
 option(THRYSTR_BUILD_APP "Build the OpenGL/ImGui application" ON)
 option(THRYSTR_BUILD_TESTS "Build unit tests" ON)
@@ -19,7 +19,7 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
         "Build type for single-config generators" FORCE)
 endif()
 
-function(thrystr_disable_vendor_warnings target_name)
+function(thrystr_disable_external_warnings target_name)
     if(TARGET ${target_name})
         target_compile_options(${target_name} PRIVATE
             $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-w>
@@ -84,61 +84,45 @@ target_compile_options(thrystr_app PRIVATE
 
 if(THRYSTR_BUILD_APP)
     find_package(OpenGL REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    find_package(PNG REQUIRED)
     find_package(X11 QUIET)
+    pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
 
-    set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
-    if(UNIX AND NOT APPLE)
-        set(GLFW_BUILD_X11     ON  CACHE BOOL "" FORCE)
-        set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
-    endif()
-    add_subdirectory(src/gui/vendor/glfw EXCLUDE_FROM_ALL)
-    add_library(thrystr::glfw ALIAS glfw)
-    thrystr_disable_vendor_warnings(glfw)
-
-    add_library(thrystr_interface_vendor STATIC
-        src/gui/vendor/imgui/imgui.cpp
-        src/gui/vendor/imgui/imgui_draw.cpp
-        src/gui/vendor/imgui/imgui_tables.cpp
-        src/gui/vendor/imgui/imgui_widgets.cpp
-        src/gui/vendor/imgui/backends/imgui_impl_glfw.cpp
-        src/gui/vendor/imgui/backends/imgui_impl_opengl3.cpp)
-    target_include_directories(thrystr_interface_vendor SYSTEM PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/imgui
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/imgui/backends)
-    target_link_libraries(thrystr_interface_vendor PUBLIC thrystr::glfw OpenGL::GL)
-    thrystr_disable_vendor_warnings(thrystr_interface_vendor)
-    add_library(thrystr::interface_vendor ALIAS thrystr_interface_vendor)
-
-    add_library(thrystr_design_vendor STATIC
-        src/gui/vendor/skald/src/theme.cpp
-        src/gui/vendor/skald/src/widgets.cpp
-        src/gui/vendor/skald/src/fonts.cpp)
-    target_include_directories(thrystr_design_vendor PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/skald/include)
-    target_link_libraries(thrystr_design_vendor PUBLIC thrystr::interface_vendor)
-    thrystr_disable_vendor_warnings(thrystr_design_vendor)
-    add_library(thrystr::design_vendor ALIAS thrystr_design_vendor)
-
-    add_library(thrystr_image_vendor STATIC
-        src/gui/vendor/stb/stb_image_impl.cpp
-        src/gui/vendor/stb/stb_image_write_impl.cpp)
-    target_include_directories(thrystr_image_vendor PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/stb)
-    thrystr_disable_vendor_warnings(thrystr_image_vendor)
-    add_library(thrystr::image_vendor ALIAS thrystr_image_vendor)
+    add_library(thrystr_interface_runtime STATIC
+        src/gui/interface/imgui.cpp
+        src/gui/interface/imgui_draw.cpp
+        src/gui/interface/imgui_tables.cpp
+        src/gui/interface/imgui_widgets.cpp
+        src/gui/interface/backends/imgui_impl_glfw.cpp
+        src/gui/interface/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(thrystr_interface_runtime SYSTEM PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/interface
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/interface/backends)
+    target_link_libraries(thrystr_interface_runtime PUBLIC PkgConfig::GLFW3 OpenGL::GL)
+    thrystr_disable_external_warnings(thrystr_interface_runtime)
+    add_library(thrystr::interface_runtime ALIAS thrystr_interface_runtime)
 
     add_library(thrystr_gui STATIC
         src/gui/system/component.cpp
+        src/gui/system/control_row_text.cpp
+        src/gui/system/control_row_tone.cpp
         src/gui/system/control_buttons.cpp
         src/gui/system/control_rows.cpp
+        src/gui/system/control_style.cpp
+        src/gui/system/control_tooltip.cpp
+        src/gui/system/file_dialog_actions.cpp
         src/gui/system/file_dialog_bridge.cpp
-        src/gui/system/file_dialog_state_bridge.cpp
+        src/gui/system/file_dialog_entry.cpp
+        src/gui/system/file_dialog_fields.cpp
+        src/gui/system/file_dialog_listing.cpp
+        src/gui/system/font_assets.cpp
         src/gui/system/font_loader.cpp
         src/gui/system/image_pixels.cpp
+        src/gui/system/image_png_io.cpp
+        src/gui/system/image_png_load.cpp
         src/gui/system/image_png.cpp
+        src/gui/system/image_png_rows.cpp
         src/gui/system/image_texture.cpp
         src/gui/system/interface_session_frame.cpp
         src/gui/system/interface_session_lifecycle.cpp
@@ -155,15 +139,24 @@ if(THRYSTR_BUILD_APP)
         src/gui/system/native_window_x11_resize.cpp
         src/gui/system/native_work_area.cpp
         src/gui/system/resize_cursor_set.cpp
+        src/gui/system/splash_action_rows.cpp
         src/gui/system/splash_bridge.cpp
+        src/gui/system/splash_hero.cpp
+        src/gui/system/splash_recent_rows.cpp
+        src/gui/system/splash_rows.cpp
+        src/gui/system/splash_wordmark.cpp
+        src/gui/system/style_accent.cpp
+        src/gui/system/style_controls.cpp
+        src/gui/system/style_geometry.cpp
+        src/gui/system/style_surfaces.cpp
         src/gui/system/style_theme.cpp
         src/gui/system/texture_upload.cpp)
     target_include_directories(thrystr_gui PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
     target_link_libraries(thrystr_gui
-        PUBLIC thrystr::interface_vendor
-        PRIVATE thrystr::design_vendor thrystr::image_vendor thrystr::glfw OpenGL::GL)
+        PUBLIC thrystr::interface_runtime
+        PRIVATE PNG::PNG PkgConfig::GLFW3 OpenGL::GL)
     target_compile_options(thrystr_gui PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>)
@@ -185,7 +178,7 @@ if(THRYSTR_BUILD_APP)
         target_compile_definitions(thrystr PRIVATE THRYSTR_HAS_X11=1)
     endif()
     target_compile_definitions(thrystr PRIVATE
-        THRYSTR_SKALD_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts"
+        THRYSTR_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts"
         THRYSTR_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
     target_compile_options(thrystr PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>

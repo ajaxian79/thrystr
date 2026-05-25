@@ -36,7 +36,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+          sudo apt-get install -y cmake ninja-build pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Configure
         shell: bash
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -55,7 +55,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+          sudo apt-get install -y cmake ninja-build clang pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Configure ASan/UBSan
         run: >
           cmake -B build -S .
@@ -78,7 +78,7 @@ jobs:
           sudo apt-get install -y clang-format
       - name: Check formatting
         run: |
-          files=$(git ls-files 'include/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tests/**/*.cpp' 'tools/**/*.cpp' 'tools/**/*.hpp' | grep -v '/vendor/' || true)
+          files=$(git ls-files 'include/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tests/**/*.cpp' 'tools/**/*.cpp' 'tools/**/*.hpp' | grep -v '/gui/interface/' || true)
           test -z "$files" || clang-format --dry-run --Werror $files
 
   tidy:
@@ -89,13 +89,14 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang clang-tidy libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+          sudo apt-get install -y cmake ninja-build clang clang-tidy pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Configure compile database
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_COMPILER=clang++
       - name: Run clang-tidy on first-party files
         run: |
-          files=$(git ls-files 'include/thrystr/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tools/**/*.cpp' 'tools/**/*.hpp' | grep -v '/vendor/' || true)
-          test -z "$files" || clang-tidy -p build $files
+          gcc_include=$(gcc -print-file-name=include)
+          files=$(git ls-files 'src/**/*.cpp' 'tools/**/*.cpp' | grep -v '/gui/interface/' || true)
+          test -z "$files" || clang-tidy -p build --extra-arg=-I"$gcc_include" $files
 
   fuzz:
     name: fuzz-wave-settings
@@ -106,7 +107,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+          sudo apt-get install -y cmake ninja-build clang pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Build fuzz target
         run: >
           cmake -B build -S .

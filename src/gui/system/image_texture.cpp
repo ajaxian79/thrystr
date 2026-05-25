@@ -4,7 +4,6 @@
 #include "image_pipeline.hpp"
 
 #include <GLFW/glfw3.h>
-#include <stb_image.h>
 
 namespace thrystr::gui {
 
@@ -21,16 +20,13 @@ void Texture::clear() noexcept {
 }
 
 Texture load_texture(const std::filesystem::path& path) {
-    Texture texture;
-    int channels = 0;
-    unsigned char* pixels =
-        stbi_load(path.string().c_str(), &texture.width, &texture.height, &channels, 4);
-    if (!pixels) {
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> pixels;
+    if (!read_png(path, width, height, pixels)) {
         return {};
     }
-    texture = upload_texture(texture.width, texture.height, pixels);
-    stbi_image_free(pixels);
-    return texture;
+    return upload_texture(width, height, pixels.data());
 }
 
 void destroy_texture(unsigned int& texture_id) {

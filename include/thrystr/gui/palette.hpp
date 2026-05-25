@@ -9,7 +9,7 @@
 namespace thrystr::gui {
 
 // Palette is the public Thrystr style vocabulary.
-// It intentionally replaces the old vendor-branded
+// It intentionally replaces the old external toolkit
 // token namespace in app-facing code. The values are
 // kept stable in this slice so screenshots and user
 // workflows remain comparable while the implementation

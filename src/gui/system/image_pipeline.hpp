@@ -21,5 +21,7 @@ std::vector<unsigned char> flip_rows(const std::vector<unsigned char>& pixels, i
                                      int height);
 bool write_png(const std::filesystem::path& path, int width, int height,
                const std::vector<unsigned char>& pixels);
+bool read_png(const std::filesystem::path& path, int& width, int& height,
+              std::vector<unsigned char>& pixels);
 
 } // namespace thrystr::gui

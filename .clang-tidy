@@ -8,5 +8,4 @@ Checks: >
   -readability-magic-numbers
 WarningsAsErrors: ''
 HeaderFilterRegex: '^(include/thrystr|src|tools)/.*'
-AnalyzeTemporaryDtors: false
 FormatStyle: file

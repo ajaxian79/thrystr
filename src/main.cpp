@@ -6432,7 +6432,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        interface_session.start(splash_window, THRYSTR_SKALD_FONT_DIR, state.fonts);
+        interface_session.start(splash_window, THRYSTR_FONT_DIR, state.fonts);
         const thrystr::gui::Texture hero_texture = thrystr::gui::load_texture(kSplashHeroPath);
         state.splash_hero_texture = hero_texture.id;
         state.splash_hero_size =
@@ -6530,7 +6530,7 @@ int main(int argc, char** argv) {
         thrystr::gui::move_resize_window(window, *workspace_geometry);
     }
 
-    interface_session.start(window, THRYSTR_SKALD_FONT_DIR, state.fonts);
+    interface_session.start(window, THRYSTR_FONT_DIR, state.fonts);
     if (!args.file.empty()) {
         std::snprintf(state.path, sizeof(state.path), "%s", args.file.c_str());
         load_path(state);
