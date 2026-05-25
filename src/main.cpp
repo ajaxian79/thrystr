@@ -2,7 +2,8 @@
 #include <thrystr/app/convergent_fit.hpp>
 #include <thrystr/app/fit_validation.hpp>
 #include <thrystr/app/multi_track_fit.hpp>
-#include <thrystr/render_io.hpp>
+#include <thrystr/gui/image.hpp>
+#include <thrystr/gui/interface_session.hpp>
 #include <thrystr/scalar_analysis.hpp>
 
 #include <GLFW/glfw3.h>
@@ -17,8 +18,6 @@
 #undef Success
 #endif
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
-#include <imgui_impl_opengl3.h>
 #include <skald/skald.h>
 #if defined(THRYSTR_HAS_DOCS)
 #include "docs_resources.hpp"
@@ -494,7 +493,7 @@ struct AppState {
     bool file_dialog_dirty = true;
     DialogPurpose pending_dialog = DialogPurpose::None;
     DialogPurpose active_dialog = DialogPurpose::None;
-    skald::Fonts fonts{};
+    thrystr::gui::FontSet fonts{};
     GLuint splash_hero_texture = 0;
     ImVec2 splash_hero_size{};
 };
@@ -6485,7 +6484,7 @@ bool text_matches_query(std::string_view title, std::string_view body, std::stri
     return haystack.find(needle) != std::string::npos;
 }
 
-void draw_markdown_body(std::string_view markdown, const skald::Fonts& fonts) {
+void draw_markdown_body(std::string_view markdown, const thrystr::gui::FontSet& fonts) {
     std::string line;
     const auto flush_line = [&](std::string_view text) {
         if (text.rfind("### ", 0) == 0 || text.rfind("## ", 0) == 0 || text.rfind("# ", 0) == 0) {
@@ -6634,47 +6633,7 @@ int main(int argc, char** argv) {
     AppState state;
     initialize_file_dialog(state);
 
-    auto begin_imgui_for_window = [&](GLFWwindow* target) {
-        glfwMakeContextCurrent(target);
-        glfwSwapInterval(1);
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        skald::ApplyDefaults(skald::tokens::accents::cyan);
-        state.fonts = skald::LoadFonts(io, THRYSTR_SKALD_FONT_DIR);
-        ImGui_ImplGlfw_InitForOpenGL(target, true);
-        ImGui_ImplOpenGL3_Init("#version 130");
-    };
-
-    auto shutdown_imgui = [&]() {
-        ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
-        ImGui::DestroyContext();
-        state.fonts = {};
-    };
-
-    auto begin_frame = []() {
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-    };
-
-    auto render_frame = [](GLFWwindow* target) {
-        ImGui::Render();
-        int fb_width = 0;
-        int fb_height = 0;
-        glfwGetFramebufferSize(target, &fb_width, &fb_height);
-        glViewport(0, 0, fb_width, fb_height);
-        constexpr ImU32 bg = skald::tokens::surface::deep;
-        glClearColor(static_cast<float>((bg >> IM_COL32_R_SHIFT) & 0xff) / 255.0f,
-                     static_cast<float>((bg >> IM_COL32_G_SHIFT) & 0xff) / 255.0f,
-                     static_cast<float>((bg >> IM_COL32_B_SHIFT) & 0xff) / 255.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        glfwSwapBuffers(target);
-        return std::pair<int, int>{fb_width, fb_height};
-    };
+    thrystr::gui::InterfaceSession interface_session;
 
     StartupAction startup_action = StartupAction::None;
     bool screenshot_saved = false;
@@ -6688,8 +6647,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        begin_imgui_for_window(splash_window);
-        const thrystr::Texture2D hero_texture = thrystr::load_rgba_texture(kSplashHeroPath);
+        interface_session.start(splash_window, THRYSTR_SKALD_FONT_DIR, state.fonts);
+        const thrystr::gui::Texture hero_texture = thrystr::gui::load_texture(kSplashHeroPath);
         state.splash_hero_texture = hero_texture.id;
         state.splash_hero_size =
             ImVec2(static_cast<float>(hero_texture.width), static_cast<float>(hero_texture.height));
@@ -6698,7 +6657,7 @@ int main(int argc, char** argv) {
         int rendered_frames = 0;
         while (!glfwWindowShouldClose(splash_window)) {
             glfwPollEvents();
-            begin_frame();
+            interface_session.begin_frame();
 
             StartupAction action = draw_splash_window(state, splash_window, chrome_cursors);
             ImGuiIO& io = ImGui::GetIO();
@@ -6710,10 +6669,11 @@ int main(int argc, char** argv) {
                 glfwSetWindowShouldClose(splash_window, GLFW_TRUE);
             }
 
-            const auto [fb_width, fb_height] = render_frame(splash_window);
+            const thrystr::gui::FrameSize frame = interface_session.render_frame(splash_window);
             ++rendered_frames;
             if (!args.screenshot.empty() && rendered_frames >= args.frames) {
-                if (!thrystr::save_screenshot_png(args.screenshot, fb_width, fb_height)) {
+                if (!thrystr::gui::save_framebuffer_png(args.screenshot, frame.width,
+                                                        frame.height)) {
                     std::fprintf(stderr, "could not write screenshot: %s\n",
                                  args.screenshot.c_str());
                 }
@@ -6726,9 +6686,9 @@ int main(int argc, char** argv) {
             }
         }
 
-        thrystr::destroy_texture(state.splash_hero_texture);
+        thrystr::gui::destroy_texture(state.splash_hero_texture);
         state.splash_hero_size = {};
-        shutdown_imgui();
+        interface_session.shutdown(state.fonts);
         glfwDestroyWindow(splash_window);
         state.request_close = false;
         state.chrome_action = ChromeAction::None;
@@ -6786,7 +6746,7 @@ int main(int argc, char** argv) {
         apply_window_geometry(window, *workspace_geometry);
     }
 
-    begin_imgui_for_window(window);
+    interface_session.start(window, THRYSTR_SKALD_FONT_DIR, state.fonts);
     if (!args.file.empty()) {
         std::snprintf(state.path, sizeof(state.path), "%s", args.file.c_str());
         load_path(state);
@@ -6796,18 +6756,18 @@ int main(int argc, char** argv) {
     int rendered_frames = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-        begin_frame();
+        interface_session.begin_frame();
 
         draw_app(state, window, chrome_cursors);
         if (state.request_close) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
 
-        const auto [fb_width, fb_height] = render_frame(window);
+        const thrystr::gui::FrameSize frame = interface_session.render_frame(window);
 
         ++rendered_frames;
         if (!args.screenshot.empty() && rendered_frames >= args.frames) {
-            if (!thrystr::save_screenshot_png(args.screenshot, fb_width, fb_height)) {
+            if (!thrystr::gui::save_framebuffer_png(args.screenshot, frame.width, frame.height)) {
                 std::fprintf(stderr, "could not write screenshot: %s\n", args.screenshot.c_str());
             }
             break;
@@ -6818,7 +6778,7 @@ int main(int argc, char** argv) {
     if (state.auto_fit_job.worker.joinable()) {
         state.auto_fit_job.worker.join();
     }
-    shutdown_imgui();
+    interface_session.shutdown(state.fonts);
     destroy_chrome_cursors(chrome_cursors);
     glfwDestroyWindow(window);
     glfwTerminate();

@@ -98,48 +98,62 @@ if(THRYSTR_BUILD_APP)
     add_library(thrystr::glfw ALIAS glfw)
     thrystr_disable_vendor_warnings(glfw)
 
-    add_library(thrystr_imgui STATIC
+    add_library(thrystr_interface_vendor STATIC
         src/gui/vendor/imgui/imgui.cpp
         src/gui/vendor/imgui/imgui_draw.cpp
         src/gui/vendor/imgui/imgui_tables.cpp
         src/gui/vendor/imgui/imgui_widgets.cpp
         src/gui/vendor/imgui/backends/imgui_impl_glfw.cpp
         src/gui/vendor/imgui/backends/imgui_impl_opengl3.cpp)
-    target_include_directories(thrystr_imgui SYSTEM PUBLIC
+    target_include_directories(thrystr_interface_vendor SYSTEM PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/imgui
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/imgui/backends)
-    target_link_libraries(thrystr_imgui PUBLIC thrystr::glfw OpenGL::GL)
-    thrystr_disable_vendor_warnings(thrystr_imgui)
-    add_library(thrystr::imgui ALIAS thrystr_imgui)
+    target_link_libraries(thrystr_interface_vendor PUBLIC thrystr::glfw OpenGL::GL)
+    thrystr_disable_vendor_warnings(thrystr_interface_vendor)
+    add_library(thrystr::interface_vendor ALIAS thrystr_interface_vendor)
 
-    add_library(thrystr_skald STATIC
+    add_library(thrystr_design_vendor STATIC
         src/gui/vendor/skald/src/theme.cpp
         src/gui/vendor/skald/src/widgets.cpp
         src/gui/vendor/skald/src/fonts.cpp)
-    target_include_directories(thrystr_skald PUBLIC
+    target_include_directories(thrystr_design_vendor PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/skald/include)
-    target_link_libraries(thrystr_skald PUBLIC thrystr::imgui)
-    thrystr_disable_vendor_warnings(thrystr_skald)
-    add_library(skald::skald ALIAS thrystr_skald)
+    target_link_libraries(thrystr_design_vendor PUBLIC thrystr::interface_vendor)
+    thrystr_disable_vendor_warnings(thrystr_design_vendor)
+    add_library(thrystr::design_vendor ALIAS thrystr_design_vendor)
 
-    add_library(thrystr_stb_image_write STATIC
+    add_library(thrystr_image_vendor STATIC
         src/gui/vendor/stb/stb_image_impl.cpp
         src/gui/vendor/stb/stb_image_write_impl.cpp)
-    target_include_directories(thrystr_stb_image_write PUBLIC
+    target_include_directories(thrystr_image_vendor PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/vendor/stb)
-    thrystr_disable_vendor_warnings(thrystr_stb_image_write)
+    thrystr_disable_vendor_warnings(thrystr_image_vendor)
+    add_library(thrystr::image_vendor ALIAS thrystr_image_vendor)
+
+    add_library(thrystr_gui STATIC
+        src/gui/system/image_pixels.cpp
+        src/gui/system/image_png.cpp
+        src/gui/system/image_texture.cpp
+        src/gui/system/interface_session_frame.cpp
+        src/gui/system/interface_session_lifecycle.cpp
+        src/gui/system/interface_types.cpp
+        src/gui/system/texture_upload.cpp)
+    target_include_directories(thrystr_gui PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_link_libraries(thrystr_gui
+        PUBLIC thrystr::design_vendor
+        PRIVATE thrystr::image_vendor thrystr::glfw OpenGL::GL)
+    target_compile_options(thrystr_gui PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>)
 
     add_executable(thrystr
-        src/main.cpp
-        src/render_io.cpp)
+        src/main.cpp)
     target_link_libraries(thrystr PRIVATE
         thrystr_core
         thrystr_app
-        skald::skald
-        thrystr::imgui
-        thrystr_stb_image_write
-        thrystr::glfw
-        OpenGL::GL)
+        thrystr_gui)
     if(UNIX AND NOT APPLE AND X11_FOUND)
         target_include_directories(thrystr PRIVATE ${X11_INCLUDE_DIR})
         target_link_libraries(thrystr PRIVATE ${X11_LIBRARIES})
@@ -212,6 +226,13 @@ if(THRYSTR_BUILD_TESTS)
         tests/app_multi_track_fit_tests.cpp)
     target_link_libraries(thrystr_multi_track_fit_tests PRIVATE thrystr_app)
     add_test(NAME thrystr_multi_track_fit_tests COMMAND thrystr_multi_track_fit_tests)
+
+    if(TARGET thrystr_gui)
+        add_executable(thrystr_gui_tests
+            tests/gui_boundary_tests.cpp)
+        target_link_libraries(thrystr_gui_tests PRIVATE thrystr_gui)
+        add_test(NAME thrystr_gui_tests COMMAND thrystr_gui_tests)
+    endif()
 endif()
 
 if(THRYSTR_BUILD_FUZZ)
