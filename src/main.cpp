@@ -4,19 +4,11 @@
 #include <thrystr/app/multi_track_fit.hpp>
 #include <thrystr/gui/image.hpp>
 #include <thrystr/gui/interface_session.hpp>
+#include <thrystr/gui/native_application.hpp>
+#include <thrystr/gui/native_window.hpp>
+#include <thrystr/gui/resize_cursor_set.hpp>
 #include <thrystr/scalar_analysis.hpp>
 
-#include <GLFW/glfw3.h>
-#if defined(THRYSTR_HAS_X11) && defined(__linux__)
-#define THRYSTR_USE_X11
-#endif
-#if defined(THRYSTR_USE_X11)
-#define GLFW_EXPOSE_NATIVE_X11
-#include <GLFW/glfw3native.h>
-#include <X11/Xatom.h>
-#undef None
-#undef Success
-#endif
 #include <imgui.h>
 #include <skald/skald.h>
 #if defined(THRYSTR_HAS_DOCS)
@@ -361,13 +353,6 @@ struct Args {
     bool size_overridden = false;
 };
 
-struct WindowGeometry {
-    int x = 0;
-    int y = 0;
-    int width = 0;
-    int height = 0;
-};
-
 struct FileBrowserEntry {
     std::string name;
     std::string size;
@@ -392,13 +377,6 @@ enum class WindowControl {
     Minimize,
     Maximize,
     Close,
-};
-
-struct ChromeCursors {
-    GLFWcursor* hresize = nullptr;
-    GLFWcursor* vresize = nullptr;
-    GLFWcursor* nwse = nullptr;
-    GLFWcursor* nesw = nullptr;
 };
 
 bool parse_non_negative_int(std::string_view text, int& value) {
@@ -494,7 +472,7 @@ struct AppState {
     DialogPurpose pending_dialog = DialogPurpose::None;
     DialogPurpose active_dialog = DialogPurpose::None;
     thrystr::gui::FontSet fonts{};
-    GLuint splash_hero_texture = 0;
+    unsigned int splash_hero_texture = 0;
     ImVec2 splash_hero_size{};
 };
 
@@ -533,162 +511,6 @@ Args parse_args(int argc, char** argv) {
         args.frames = 90;
     }
     return args;
-}
-
-void glfw_error(int code, const char* message) {
-    std::fprintf(stderr, "glfw error %d: %s\n", code, message);
-}
-
-void prefer_x11_when_available() {
-#if defined(__linux__) && defined(GLFW_PLATFORM_X11)
-    if (std::getenv("DISPLAY") != nullptr) {
-        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
-    }
-#endif
-}
-
-void force_undecorated_window(GLFWwindow* window) {
-    if (!window) {
-        return;
-    }
-    glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
-#if defined(THRYSTR_USE_X11)
-    if (glfwGetPlatform() != GLFW_PLATFORM_X11) {
-        return;
-    }
-
-    Display* display = glfwGetX11Display();
-    const Window xwindow = glfwGetX11Window(window);
-    if (!display || xwindow == 0) {
-        return;
-    }
-
-    struct MotifWmHints {
-        unsigned long flags;
-        unsigned long functions;
-        unsigned long decorations;
-        long input_mode;
-        unsigned long status;
-    };
-    static_assert(sizeof(MotifWmHints) == 5 * sizeof(unsigned long));
-
-    constexpr unsigned long kDecorationsFlag = 1UL << 1;
-    MotifWmHints hints{};
-    hints.flags = kDecorationsFlag;
-    hints.decorations = 0;
-    const Atom property = XInternAtom(display, "_MOTIF_WM_HINTS", False);
-    XChangeProperty(display, xwindow, property, property, 32, PropModeReplace,
-                    reinterpret_cast<const unsigned char*>(&hints), 5);
-    XFlush(display);
-#endif
-}
-
-void center_window_on_primary_monitor(GLFWwindow* window) {
-    if (!window) {
-        return;
-    }
-
-    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-    if (!monitor) {
-        return;
-    }
-
-    int work_x = 0;
-    int work_y = 0;
-    int work_w = 0;
-    int work_h = 0;
-    glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_w, &work_h);
-
-    int window_w = 0;
-    int window_h = 0;
-    glfwGetWindowSize(window, &window_w, &window_h);
-    glfwSetWindowPos(window, work_x + std::max(0, (work_w - window_w) / 2),
-                     work_y + std::max(0, (work_h - window_h) / 2));
-}
-
-std::optional<WindowGeometry> default_workspace_geometry() {
-    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-    if (!monitor) {
-        return std::nullopt;
-    }
-
-    int work_x = 0;
-    int work_y = 0;
-    int work_w = 0;
-    int work_h = 0;
-    glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_w, &work_h);
-    if (work_w <= 0 || work_h <= 0) {
-        return std::nullopt;
-    }
-
-    const int left_margin = std::min(50, static_cast<int>(std::floor(work_w * 0.05)));
-    const int right_margin = std::min(50, static_cast<int>(std::floor(work_w * 0.05)));
-    const int top_margin = std::min(50, static_cast<int>(std::floor(work_h * 0.05)));
-    const int bottom_margin = std::min(150, static_cast<int>(std::floor(work_h * 0.15)));
-
-    WindowGeometry geometry;
-    geometry.x = work_x + left_margin;
-    geometry.y = work_y + top_margin;
-    geometry.width = std::max(kMinWindowWidth, work_w - left_margin - right_margin);
-    geometry.height = std::max(kMinWindowHeight, work_h - top_margin - bottom_margin);
-    return geometry;
-}
-
-void apply_window_geometry(GLFWwindow* window, const WindowGeometry& geometry) {
-    if (!window) {
-        return;
-    }
-    glfwSetWindowPos(window, geometry.x, geometry.y);
-    glfwSetWindowSize(window, geometry.width, geometry.height);
-}
-
-GLFWwindow* create_undecorated_window(int width, int height, const char* title, int min_width,
-                                      int min_height, bool resizable, bool visible) {
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_RESIZABLE, resizable ? GLFW_TRUE : GLFW_FALSE);
-    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
-
-    GLFWwindow* window = glfwCreateWindow(width, height, title, nullptr, nullptr);
-    if (!window) {
-        return nullptr;
-    }
-
-    force_undecorated_window(window);
-    glfwSetWindowSizeLimits(window, resizable ? min_width : width, resizable ? min_height : height,
-                            resizable ? GLFW_DONT_CARE : width,
-                            resizable ? GLFW_DONT_CARE : height);
-    center_window_on_primary_monitor(window);
-    return window;
-}
-
-ChromeCursors create_chrome_cursors() {
-    ChromeCursors cursors;
-    cursors.hresize = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
-    cursors.vresize = glfwCreateStandardCursor(GLFW_VRESIZE_CURSOR);
-    cursors.nwse = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
-    cursors.nesw = glfwCreateStandardCursor(GLFW_RESIZE_NESW_CURSOR);
-    return cursors;
-}
-
-void destroy_chrome_cursors(ChromeCursors& cursors) {
-    if (cursors.hresize) {
-        glfwDestroyCursor(cursors.hresize);
-        cursors.hresize = nullptr;
-    }
-    if (cursors.vresize) {
-        glfwDestroyCursor(cursors.vresize);
-        cursors.vresize = nullptr;
-    }
-    if (cursors.nwse) {
-        glfwDestroyCursor(cursors.nwse);
-        cursors.nwse = nullptr;
-    }
-    if (cursors.nesw) {
-        glfwDestroyCursor(cursors.nesw);
-        cursors.nesw = nullptr;
-    }
 }
 
 bool chrome_action_is_resize(ChromeAction action) {
@@ -750,20 +572,20 @@ ChromeAction resize_action_at(double cursor_x, double cursor_y, int window_w, in
     return ChromeAction::None;
 }
 
-GLFWcursor* cursor_for_action(const ChromeCursors& cursors, ChromeAction action) {
+void* cursor_for_action(const thrystr::gui::ResizeCursorSet& cursors, ChromeAction action) {
     switch (action) {
     case ChromeAction::ResizeLeft:
     case ChromeAction::ResizeRight:
-        return cursors.hresize;
+        return cursors.cursor(thrystr::gui::ResizeCursor::Horizontal);
     case ChromeAction::ResizeTop:
     case ChromeAction::ResizeBottom:
-        return cursors.vresize;
+        return cursors.cursor(thrystr::gui::ResizeCursor::Vertical);
     case ChromeAction::ResizeTopLeft:
     case ChromeAction::ResizeBottomRight:
-        return cursors.nwse;
+        return cursors.cursor(thrystr::gui::ResizeCursor::DiagonalDown);
     case ChromeAction::ResizeTopRight:
     case ChromeAction::ResizeBottomLeft:
-        return cursors.nesw;
+        return cursors.cursor(thrystr::gui::ResizeCursor::DiagonalUp);
     case ChromeAction::Move:
     case ChromeAction::None:
         return nullptr;
@@ -771,66 +593,36 @@ GLFWcursor* cursor_for_action(const ChromeCursors& cursors, ChromeAction action)
     return nullptr;
 }
 
-std::pair<double, double> global_cursor_position(GLFWwindow* window, double cursor_x,
+std::pair<double, double> global_cursor_position(thrystr::gui::WindowHandle window, double cursor_x,
                                                  double cursor_y) {
-#if defined(THRYSTR_USE_X11)
-    if (window && glfwGetPlatform() == GLFW_PLATFORM_X11) {
-        Display* display = glfwGetX11Display();
-        const Window xwindow = glfwGetX11Window(window);
-        if (display && xwindow != 0) {
-            Window root = 0;
-            Window child = 0;
-            int root_x = 0;
-            int root_y = 0;
-            int window_x = 0;
-            int window_y = 0;
-            unsigned int mask = 0;
-            if (XQueryPointer(display, xwindow, &root, &child, &root_x, &root_y, &window_x,
-                              &window_y, &mask)) {
-                return {static_cast<double>(root_x), static_cast<double>(root_y)};
-            }
-        }
-    }
-#endif
-    int window_x = 0;
-    int window_y = 0;
-    glfwGetWindowPos(window, &window_x, &window_y);
-    return {
-        static_cast<double>(window_x) + cursor_x,
-        static_cast<double>(window_y) + cursor_y,
-    };
+    const thrystr::gui::CursorPoint point =
+        thrystr::gui::global_cursor_position(window, {cursor_x, cursor_y});
+    return {point.x, point.y};
 }
 
-void begin_chrome_action(AppState& state, GLFWwindow* window, ChromeAction action, double cursor_x,
-                         double cursor_y) {
+void begin_chrome_action(AppState& state, thrystr::gui::WindowHandle window, ChromeAction action,
+                         double cursor_x, double cursor_y) {
     state.chrome_action = action;
     const auto [global_x, global_y] = global_cursor_position(window, cursor_x, cursor_y);
     state.chrome_start_global_x = global_x;
     state.chrome_start_global_y = global_y;
-    glfwGetWindowPos(window, &state.chrome_start_window_x, &state.chrome_start_window_y);
-    glfwGetWindowSize(window, &state.chrome_start_window_w, &state.chrome_start_window_h);
+    const thrystr::gui::Point position = thrystr::gui::window_position(window);
+    const thrystr::gui::Size size = thrystr::gui::window_size(window);
+    state.chrome_start_window_x = position.x;
+    state.chrome_start_window_y = position.y;
+    state.chrome_start_window_w = size.width;
+    state.chrome_start_window_h = size.height;
 }
 
-void update_chrome_action(AppState& state, GLFWwindow* window, double cursor_x, double cursor_y) {
+void update_chrome_action(AppState& state, thrystr::gui::WindowHandle window, double cursor_x,
+                          double cursor_y) {
     const auto [global_x, global_y] = global_cursor_position(window, cursor_x, cursor_y);
     const int dx = static_cast<int>(std::lround(global_x - state.chrome_start_global_x));
     const int dy = static_cast<int>(std::lround(global_y - state.chrome_start_global_y));
 
     if (state.chrome_action == ChromeAction::Move) {
-#if defined(THRYSTR_USE_X11)
-        if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
-            Display* display = glfwGetX11Display();
-            const Window xwindow = glfwGetX11Window(window);
-            if (display && xwindow != 0) {
-                XMoveWindow(display, xwindow, state.chrome_start_window_x + dx,
-                            state.chrome_start_window_y + dy);
-                XFlush(display);
-                return;
-            }
-        }
-#endif
-        glfwSetWindowPos(window, state.chrome_start_window_x + dx,
-                         state.chrome_start_window_y + dy);
+        thrystr::gui::move_window(
+            window, {state.chrome_start_window_x + dx, state.chrome_start_window_y + dy});
         return;
     }
 
@@ -861,71 +653,50 @@ void update_chrome_action(AppState& state, GLFWwindow* window, double cursor_x, 
         h = std::max(kMinWindowHeight, state.chrome_start_window_h + dy);
     }
 
-#if defined(THRYSTR_USE_X11)
-    if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
-        Display* display = glfwGetX11Display();
-        const Window xwindow = glfwGetX11Window(window);
-        if (display && xwindow != 0) {
-            XMoveResizeWindow(display, xwindow, x, y, static_cast<unsigned int>(w),
-                              static_cast<unsigned int>(h));
-            XFlush(display);
-            return;
-        }
-    }
-#endif
-
-    if (x != state.chrome_start_window_x || y != state.chrome_start_window_y) {
-        glfwSetWindowPos(window, x, y);
-    }
-    glfwSetWindowSize(window, w, h);
+    thrystr::gui::move_resize_window(window, {{x, y}, {w, h}});
 }
 
-void handle_custom_chrome(AppState& state, GLFWwindow* window, const ChromeCursors& cursors,
-                          bool allow_resize = true) {
-    if (!window || glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
+void handle_custom_chrome(AppState& state, thrystr::gui::WindowHandle window,
+                          const thrystr::gui::ResizeCursorSet& cursors, bool allow_resize = true) {
+    if (!window || thrystr::gui::is_iconified(window)) {
         return;
     }
 
-    double cursor_x = 0.0;
-    double cursor_y = 0.0;
-    glfwGetCursorPos(window, &cursor_x, &cursor_y);
-
-    int window_w = 0;
-    int window_h = 0;
-    glfwGetWindowSize(window, &window_w, &window_h);
+    const thrystr::gui::CursorPoint cursor = thrystr::gui::cursor_position(window);
+    const thrystr::gui::Size size = thrystr::gui::window_size(window);
 
     if (state.chrome_action != ChromeAction::None) {
-        glfwSetCursor(window, cursor_for_action(cursors, state.chrome_action));
+        thrystr::gui::set_cursor(window, cursor_for_action(cursors, state.chrome_action));
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            update_chrome_action(state, window, cursor_x, cursor_y);
+            update_chrome_action(state, window, cursor.x, cursor.y);
         } else {
             state.chrome_action = ChromeAction::None;
-            glfwSetCursor(window, nullptr);
+            thrystr::gui::set_cursor(window, nullptr);
         }
         return;
     }
 
-    if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
-        glfwSetCursor(window, nullptr);
+    if (thrystr::gui::is_maximized(window)) {
+        thrystr::gui::set_cursor(window, nullptr);
         return;
     }
 
     const ChromeAction resize_action =
-        allow_resize ? resize_action_at(cursor_x, cursor_y, window_w, window_h)
+        allow_resize ? resize_action_at(cursor.x, cursor.y, size.width, size.height)
                      : ChromeAction::None;
     const bool resize_hovered = chrome_action_is_resize(resize_action);
     const bool titlebar_hovered =
-        cursor_y >= 0.0 && cursor_y <= static_cast<double>(kTopChromeHeight);
+        cursor.y >= 0.0 && cursor.y <= static_cast<double>(kTopChromeHeight);
     const bool item_hovered = ImGui::IsAnyItemHovered();
     const ChromeAction hover_action =
         resize_hovered
             ? resize_action
             : (titlebar_hovered && !item_hovered ? ChromeAction::Move : ChromeAction::None);
 
-    glfwSetCursor(window, cursor_for_action(cursors, hover_action));
+    thrystr::gui::set_cursor(window, cursor_for_action(cursors, hover_action));
 
     if (hover_action != ChromeAction::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        begin_chrome_action(state, window, hover_action, cursor_x, cursor_y);
+        begin_chrome_action(state, window, hover_action, cursor.x, cursor.y);
     }
 }
 
@@ -4137,7 +3908,8 @@ bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = f
     return clicked;
 }
 
-bool window_control_button(WindowControl control, const char* tooltip, GLFWwindow* window) {
+bool window_control_button(WindowControl control, const char* tooltip,
+                           thrystr::gui::WindowHandle window) {
     const float size = kWindowControlButtonSize;
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const char* id = control == WindowControl::Minimize   ? "##window_minimize"
@@ -4162,7 +3934,7 @@ bool window_control_button(WindowControl control, const char* tooltip, GLFWwindo
         draw->AddLine(ImVec2(center.x - 5.0f, center.y + 4.0f),
                       ImVec2(center.x + 5.0f, center.y + 4.0f), ink, 1.6f);
     } else if (control == WindowControl::Maximize) {
-        const bool maximized = window && glfwGetWindowAttrib(window, GLFW_MAXIMIZED);
+        const bool maximized = window && thrystr::gui::is_maximized(window);
         if (maximized) {
             draw->AddRect(ImVec2(center.x - 3.0f, center.y - 5.0f),
                           ImVec2(center.x + 5.0f, center.y + 3.0f), ink, 0.0f, 0, 1.4f);
@@ -4230,7 +4002,7 @@ void draw_titlebar_wordmark(AppState& state, const char* tagline) {
     ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s", tagline);
 }
 
-void draw_titlebar(AppState& state, GLFWwindow* window) {
+void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
     const ImVec2 viewport = begin_titlebar_chrome("##titlebar");
     draw_titlebar_background(viewport);
     draw_titlebar_wordmark(state, "/ function workspace");
@@ -4320,15 +4092,11 @@ void draw_titlebar(AppState& state, GLFWwindow* window) {
     const float controls_width = window_control_group_width(3);
     ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 8.0f));
     if (window_control_button(WindowControl::Minimize, "Minimize", window)) {
-        glfwIconifyWindow(window);
+        thrystr::gui::minimize_window(window);
     }
     ImGui::SameLine();
     if (window_control_button(WindowControl::Maximize, "Maximize", window)) {
-        if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
-            glfwRestoreWindow(window);
-        } else {
-            glfwMaximizeWindow(window);
-        }
+        thrystr::gui::toggle_maximized_window(window);
     }
     ImGui::SameLine();
     if (window_control_button(WindowControl::Close, "Close", window)) {
@@ -4816,7 +4584,7 @@ StartupAction draw_splash(AppState& state) {
     return StartupAction::None;
 }
 
-void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
+void draw_splash_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
     const ImVec2 viewport = begin_titlebar_chrome("##splash_titlebar");
     draw_titlebar_background(viewport);
     draw_titlebar_wordmark(state, "/ start");
@@ -4829,8 +4597,8 @@ void draw_splash_titlebar(AppState& state, GLFWwindow* window) {
     ImGui::End();
 }
 
-StartupAction draw_splash_window(AppState& state, GLFWwindow* window,
-                                 const ChromeCursors& cursors) {
+StartupAction draw_splash_window(AppState& state, thrystr::gui::WindowHandle window,
+                                 const thrystr::gui::ResizeCursorSet& cursors) {
     StartupAction choice = draw_splash(state);
     draw_splash_titlebar(state, window);
     handle_custom_chrome(state, window, cursors, false);
@@ -6603,7 +6371,8 @@ void handle_shortcuts(AppState& state) {
     }
 }
 
-void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors) {
+void draw_app(AppState& state, thrystr::gui::WindowHandle window,
+              const thrystr::gui::ResizeCursorSet& cursors) {
     finish_auto_fit_if_ready(state);
     handle_shortcuts(state);
     draw_titlebar(state, window);
@@ -6623,13 +6392,12 @@ void draw_app(AppState& state, GLFWwindow* window, const ChromeCursors& cursors)
 int main(int argc, char** argv) {
     const Args args = parse_args(argc, argv);
 
-    glfwSetErrorCallback(glfw_error);
-    prefer_x11_when_available();
-    if (!glfwInit()) {
+    thrystr::gui::NativeApplication native_application;
+    if (!native_application.ready()) {
         return 1;
     }
 
-    ChromeCursors chrome_cursors = create_chrome_cursors();
+    thrystr::gui::ResizeCursorSet chrome_cursors;
     AppState state;
     initialize_file_dialog(state);
 
@@ -6638,12 +6406,13 @@ int main(int argc, char** argv) {
     StartupAction startup_action = StartupAction::None;
     bool screenshot_saved = false;
     if (args.file.empty()) {
-        GLFWwindow* splash_window =
-            create_undecorated_window(kSplashWindowWidth, kSplashWindowHeight, "thrystr start",
-                                      kSplashMinWindowWidth, kSplashMinWindowHeight, false, false);
+        thrystr::gui::WindowHandle splash_window =
+            thrystr::gui::create_window({"thrystr start",
+                                         {kSplashWindowWidth, kSplashWindowHeight},
+                                         {kSplashMinWindowWidth, kSplashMinWindowHeight},
+                                         false,
+                                         false});
         if (!splash_window) {
-            destroy_chrome_cursors(chrome_cursors);
-            glfwTerminate();
             return 1;
         }
 
@@ -6652,11 +6421,11 @@ int main(int argc, char** argv) {
         state.splash_hero_texture = hero_texture.id;
         state.splash_hero_size =
             ImVec2(static_cast<float>(hero_texture.width), static_cast<float>(hero_texture.height));
-        glfwShowWindow(splash_window);
+        thrystr::gui::show_window(splash_window);
 
         int rendered_frames = 0;
-        while (!glfwWindowShouldClose(splash_window)) {
-            glfwPollEvents();
+        while (!thrystr::gui::should_close(splash_window)) {
+            thrystr::gui::poll_events();
             interface_session.begin_frame();
 
             StartupAction action = draw_splash_window(state, splash_window, chrome_cursors);
@@ -6666,7 +6435,7 @@ int main(int argc, char** argv) {
                 action = StartupAction::NewWorkspace;
             }
             if (state.request_close) {
-                glfwSetWindowShouldClose(splash_window, GLFW_TRUE);
+                thrystr::gui::request_close(splash_window);
             }
 
             const thrystr::gui::FrameSize frame = interface_session.render_frame(splash_window);
@@ -6689,19 +6458,15 @@ int main(int argc, char** argv) {
         thrystr::gui::destroy_texture(state.splash_hero_texture);
         state.splash_hero_size = {};
         interface_session.shutdown(state.fonts);
-        glfwDestroyWindow(splash_window);
+        thrystr::gui::destroy_window(splash_window);
         state.request_close = false;
         state.chrome_action = ChromeAction::None;
         state.splash_open = false;
 
         if (screenshot_saved) {
-            destroy_chrome_cursors(chrome_cursors);
-            glfwTerminate();
             return 0;
         }
         if (startup_action == StartupAction::None) {
-            destroy_chrome_cursors(chrome_cursors);
-            glfwTerminate();
             return 0;
         }
 
@@ -6724,26 +6489,29 @@ int main(int argc, char** argv) {
         state.splash_open = false;
     }
 
-    std::optional<WindowGeometry> workspace_geometry;
+    std::optional<thrystr::gui::WindowBounds> workspace_geometry;
     int workspace_width = args.width;
     int workspace_height = args.height;
     if (!args.size_overridden) {
-        workspace_geometry = default_workspace_geometry();
+        workspace_geometry =
+            thrystr::gui::preferred_workspace_bounds({kMinWindowWidth, kMinWindowHeight});
         if (workspace_geometry) {
-            workspace_width = workspace_geometry->width;
-            workspace_height = workspace_geometry->height;
+            workspace_width = workspace_geometry->size.width;
+            workspace_height = workspace_geometry->size.height;
         }
     }
 
-    GLFWwindow* window = create_undecorated_window(workspace_width, workspace_height, "thrystr",
-                                                   kMinWindowWidth, kMinWindowHeight, true, false);
+    thrystr::gui::WindowHandle window =
+        thrystr::gui::create_window({"thrystr",
+                                     {workspace_width, workspace_height},
+                                     {kMinWindowWidth, kMinWindowHeight},
+                                     true,
+                                     false});
     if (!window) {
-        destroy_chrome_cursors(chrome_cursors);
-        glfwTerminate();
         return 1;
     }
     if (workspace_geometry) {
-        apply_window_geometry(window, *workspace_geometry);
+        thrystr::gui::move_resize_window(window, *workspace_geometry);
     }
 
     interface_session.start(window, THRYSTR_SKALD_FONT_DIR, state.fonts);
@@ -6751,16 +6519,16 @@ int main(int argc, char** argv) {
         std::snprintf(state.path, sizeof(state.path), "%s", args.file.c_str());
         load_path(state);
     }
-    glfwShowWindow(window);
+    thrystr::gui::show_window(window);
 
     int rendered_frames = 0;
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+    while (!thrystr::gui::should_close(window)) {
+        thrystr::gui::poll_events();
         interface_session.begin_frame();
 
         draw_app(state, window, chrome_cursors);
         if (state.request_close) {
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            thrystr::gui::request_close(window);
         }
 
         const thrystr::gui::FrameSize frame = interface_session.render_frame(window);
@@ -6779,8 +6547,6 @@ int main(int argc, char** argv) {
         state.auto_fit_job.worker.join();
     }
     interface_session.shutdown(state.fonts);
-    destroy_chrome_cursors(chrome_cursors);
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    thrystr::gui::destroy_window(window);
     return 0;
 }

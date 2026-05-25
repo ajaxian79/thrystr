@@ -131,12 +131,25 @@ if(THRYSTR_BUILD_APP)
     add_library(thrystr::image_vendor ALIAS thrystr_image_vendor)
 
     add_library(thrystr_gui STATIC
+        src/gui/system/component.cpp
         src/gui/system/image_pixels.cpp
         src/gui/system/image_png.cpp
         src/gui/system/image_texture.cpp
         src/gui/system/interface_session_frame.cpp
         src/gui/system/interface_session_lifecycle.cpp
         src/gui/system/interface_types.cpp
+        src/gui/system/native_application.cpp
+        src/gui/system/native_window_create.cpp
+        src/gui/system/native_window_decoration.cpp
+        src/gui/system/native_window_lifecycle.cpp
+        src/gui/system/native_window_metrics.cpp
+        src/gui/system/native_window_move.cpp
+        src/gui/system/native_window_placement.cpp
+        src/gui/system/native_window_x11.cpp
+        src/gui/system/native_window_x11_move.cpp
+        src/gui/system/native_window_x11_resize.cpp
+        src/gui/system/native_work_area.cpp
+        src/gui/system/resize_cursor_set.cpp
         src/gui/system/texture_upload.cpp)
     target_include_directories(thrystr_gui PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -147,6 +160,11 @@ if(THRYSTR_BUILD_APP)
     target_compile_options(thrystr_gui PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+    if(UNIX AND NOT APPLE AND X11_FOUND)
+        target_include_directories(thrystr_gui PRIVATE ${X11_INCLUDE_DIR})
+        target_link_libraries(thrystr_gui PRIVATE ${X11_LIBRARIES})
+        target_compile_definitions(thrystr_gui PRIVATE THRYSTR_HAS_X11=1)
+    endif()
 
     add_executable(thrystr
         src/main.cpp)
@@ -232,6 +250,11 @@ if(THRYSTR_BUILD_TESTS)
             tests/gui_boundary_tests.cpp)
         target_link_libraries(thrystr_gui_tests PRIVATE thrystr_gui)
         add_test(NAME thrystr_gui_tests COMMAND thrystr_gui_tests)
+
+        add_executable(thrystr_gui_window_tests
+            tests/gui_window_tests.cpp)
+        target_link_libraries(thrystr_gui_window_tests PRIVATE thrystr_gui)
+        add_test(NAME thrystr_gui_window_tests COMMAND thrystr_gui_window_tests)
     endif()
 endif()
 
