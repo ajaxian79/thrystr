@@ -10,7 +10,11 @@
 #include <thrystr/scalar_analysis.hpp>
 
 #include <imgui.h>
-#include <skald/skald.h>
+#include <thrystr/gui/controls.hpp>
+#include <thrystr/gui/file_dialog.hpp>
+#include <thrystr/gui/icons.hpp>
+#include <thrystr/gui/palette.hpp>
+#include <thrystr/gui/splash.hpp>
 #if defined(THRYSTR_HAS_DOCS)
 #include "docs_resources.hpp"
 #endif
@@ -48,6 +52,8 @@
 #include <vector>
 
 namespace {
+
+namespace palette = thrystr::gui::palette;
 
 constexpr float kToolboxWidth = 380.0f;
 constexpr float kTopChromeHeight = 44.0f;
@@ -105,23 +111,21 @@ constexpr std::size_t kEncodedTrackHeaderBytes = 8u;
 constexpr std::size_t kEncodedSectionBytes = sizeof(std::uint32_t) * 2u + sizeof(double) * 8u;
 constexpr ImU32 kTransparent = IM_COL32(0, 0, 0, 0);
 
-const ImU32 kDataPointHi = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.92f);
-const ImU32 kDataPointMed = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.86f);
-const ImU32 kDataPointLo = skald::tokens::with_alpha(skald::tokens::ink::primary, 0.73f);
-const ImU32 kDataLineColor = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
-const ImU32 kMaxDeltaFill =
-    skald::tokens::with_alpha(skald::tokens::status::destructive, 40.0f / 255.0f);
-const ImU32 kSelectionFill = skald::tokens::with_alpha(skald::tokens::status::info, 32.0f / 255.0f);
-const ImU32 kSelectionEdge =
-    skald::tokens::with_alpha(skald::tokens::status::info, 210.0f / 255.0f);
-const ImU32 kSelectionHandle = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
+const ImU32 kDataPointHi = palette::with_alpha(palette::ink::primary, 0.92f);
+const ImU32 kDataPointMed = palette::with_alpha(palette::ink::primary, 0.86f);
+const ImU32 kDataPointLo = palette::with_alpha(palette::ink::primary, 0.73f);
+const ImU32 kDataLineColor = palette::with_alpha(palette::status::info, 0.92f);
+const ImU32 kMaxDeltaFill = palette::with_alpha(palette::status::destructive, 40.0f / 255.0f);
+const ImU32 kSelectionFill = palette::with_alpha(palette::status::info, 32.0f / 255.0f);
+const ImU32 kSelectionEdge = palette::with_alpha(palette::status::info, 210.0f / 255.0f);
+const ImU32 kSelectionHandle = palette::with_alpha(palette::status::info, 0.92f);
 const std::array<ImU32, 6> kWaveColors = {
-    skald::tokens::with_alpha(skald::tokens::accents::gold, 0.86f),
-    skald::tokens::with_alpha(skald::tokens::accents::mint, 0.86f),
-    skald::tokens::with_alpha(skald::tokens::status::destructive, 0.86f),
-    skald::tokens::with_alpha(skald::tokens::accents::violet, 0.86f),
-    skald::tokens::with_alpha(skald::tokens::accents::ember, 0.86f),
-    skald::tokens::with_alpha(skald::tokens::accents::cyan, 0.86f),
+    palette::with_alpha(palette::accents::gold, 0.86f),
+    palette::with_alpha(palette::accents::mint, 0.86f),
+    palette::with_alpha(palette::status::destructive, 0.86f),
+    palette::with_alpha(palette::accents::violet, 0.86f),
+    palette::with_alpha(palette::accents::ember, 0.86f),
+    palette::with_alpha(palette::accents::cyan, 0.86f),
 };
 
 enum class DialogPurpose {
@@ -464,9 +468,9 @@ struct AppState {
     int docs_page = 0;
     char docs_search[128] = {};
     std::optional<std::size_t> pending_scroll_index;
-    skald::FileDialogState file_dialog{};
+    thrystr::gui::FileDialogState file_dialog{};
     std::vector<FileBrowserEntry> file_dialog_rows;
-    std::vector<skald::FileDialogEntry> file_dialog_entries;
+    std::vector<thrystr::gui::FileDialogEntry> file_dialog_entries;
     int file_dialog_last_row = -1;
     bool file_dialog_dirty = true;
     DialogPurpose pending_dialog = DialogPurpose::None;
@@ -824,7 +828,7 @@ void refresh_file_dialog_entries(AppState& state) {
     state.file_dialog_rows.insert(state.file_dialog_rows.end(), rows.begin(), rows.end());
     state.file_dialog_entries.reserve(state.file_dialog_rows.size());
     for (const FileBrowserEntry& row : state.file_dialog_rows) {
-        state.file_dialog_entries.push_back(skald::FileDialogEntry{
+        state.file_dialog_entries.push_back(thrystr::gui::FileDialogEntry{
             row.name,
             row.size,
             row.modified,
@@ -3901,9 +3905,9 @@ void request_file_dialog(AppState& state, DialogPurpose purpose) {
 bool toolbar_icon_button(const char* glyph, const char* tooltip, bool accent = false) {
     const ImU32 text_color = accent
                                  ? ImGui::GetColorU32(ImGui::GetStyle().Colors[ImGuiCol_CheckMark])
-                                 : skald::tokens::ink::primary;
-    ImGui::PushStyleColor(ImGuiCol_Text, skald::tokens::to_vec4(text_color));
-    const bool clicked = skald::IconButton(glyph, tooltip);
+                                 : palette::ink::primary;
+    ImGui::PushStyleColor(ImGuiCol_Text, palette::to_vec4(text_color));
+    const bool clicked = thrystr::gui::icon_button(glyph, tooltip);
     ImGui::PopStyleColor();
     return clicked;
 }
@@ -3923,11 +3927,11 @@ bool window_control_button(WindowControl control, const char* tooltip,
 
     const ImU32 fill =
         control == WindowControl::Close && hovered
-            ? skald::tokens::with_alpha(skald::tokens::status::destructive, active ? 0.70f : 0.52f)
-        : hovered ? skald::tokens::surface::control
+            ? palette::with_alpha(palette::status::destructive, active ? 0.70f : 0.52f)
+        : hovered ? palette::surface::control
                   : kTransparent;
-    const ImU32 ink = hovered ? skald::tokens::ink::primary : skald::tokens::ink::muted;
-    draw->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), fill, skald::tokens::radii::ctrl);
+    const ImU32 ink = hovered ? palette::ink::primary : palette::ink::muted;
+    draw->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), fill, palette::radii::ctrl);
 
     const ImVec2 center(pos.x + size * 0.5f, pos.y + size * 0.5f);
     if (control == WindowControl::Minimize) {
@@ -3952,7 +3956,7 @@ bool window_control_button(WindowControl control, const char* tooltip,
     }
 
     if (hovered && tooltip && tooltip[0] != '\0') {
-        skald::Tooltip(tooltip);
+        thrystr::gui::tooltip(tooltip);
     }
     return clicked;
 }
@@ -3970,8 +3974,8 @@ ImVec2 begin_titlebar_chrome(const char* id) {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(viewport.x, kTopChromeHeight));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, skald::tokens::pad::window);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::none);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, palette::pad::window);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, palette::radii::none);
     ImGui::Begin(id, nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus |
@@ -3983,10 +3987,9 @@ ImVec2 begin_titlebar_chrome(const char* id) {
 void draw_titlebar_background(const ImVec2& viewport) {
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(ImVec2(0.0f, 0.0f), ImVec2(viewport.x, kTopChromeHeight),
-                        skald::tokens::surface::deep);
+                        palette::surface::deep);
     draw->AddLine(ImVec2(0.0f, kTopChromeHeight - 1.0f),
-                  ImVec2(viewport.x, kTopChromeHeight - 1.0f), skald::tokens::border::separator,
-                  1.0f);
+                  ImVec2(viewport.x, kTopChromeHeight - 1.0f), palette::border::separator, 1.0f);
 }
 
 void draw_titlebar_wordmark(AppState& state, const char* tagline) {
@@ -3999,7 +4002,7 @@ void draw_titlebar_wordmark(AppState& state, const char* tagline) {
         ImGui::PopFont();
     }
     ImGui::SameLine(72.0f);
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s", tagline);
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "%s", tagline);
 }
 
 void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
@@ -4008,7 +4011,7 @@ void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
     draw_titlebar_wordmark(state, "/ function workspace");
 
     ImGui::SameLine(188.0f);
-    if (skald::GhostButton("File", ImVec2(52.0f, 0.0f))) {
+    if (thrystr::gui::ghost_button("File", ImVec2(52.0f, 0.0f))) {
         ImGui::OpenPopup("##file_menu");
     }
     if (ImGui::BeginPopup("##file_menu")) {
@@ -4024,7 +4027,7 @@ void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
         if (ImGui::MenuItem("Save Function Data...")) {
             request_file_dialog(state, DialogPurpose::SaveWave);
         }
-        skald::MutedSeparator();
+        thrystr::gui::muted_separator();
         if (ImGui::MenuItem("Exit")) {
             state.request_close = true;
         }
@@ -4032,20 +4035,20 @@ void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
     }
 
     ImGui::SameLine();
-    if (toolbar_icon_button(skald::icons::kFile, "Load source data")) {
+    if (toolbar_icon_button(thrystr::gui::icons::kFile, "Load source data")) {
         request_file_dialog(state, DialogPurpose::OpenSource);
     }
     ImGui::SameLine();
-    if (toolbar_icon_button(skald::icons::kFolder, "Load function data")) {
+    if (toolbar_icon_button(thrystr::gui::icons::kFolder, "Load function data")) {
         request_file_dialog(state, DialogPurpose::LoadWave);
     }
     ImGui::SameLine();
-    if (toolbar_icon_button(skald::icons::kSave, "Save function data")) {
+    if (toolbar_icon_button(thrystr::gui::icons::kSave, "Save function data")) {
         request_file_dialog(state, DialogPurpose::SaveWave);
     }
 
     ImGui::SameLine();
-    if (skald::GhostButton("Create", ImVec2(70.0f, 0.0f))) {
+    if (thrystr::gui::ghost_button("Create", ImVec2(70.0f, 0.0f))) {
         ImGui::OpenPopup("##create_menu");
     }
     if (ImGui::BeginPopup("##create_menu")) {
@@ -4062,7 +4065,7 @@ void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
     }
 
     ImGui::SameLine();
-    if (skald::GhostButton("Settings", ImVec2(82.0f, 0.0f))) {
+    if (thrystr::gui::ghost_button("Settings", ImVec2(82.0f, 0.0f))) {
         ImGui::OpenPopup("##settings_menu");
     }
     if (ImGui::BeginPopup("##settings_menu")) {
@@ -4073,7 +4076,7 @@ void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
     }
 
     ImGui::SameLine();
-    if (skald::GhostButton("Help", ImVec2(58.0f, 0.0f))) {
+    if (thrystr::gui::ghost_button("Help", ImVec2(58.0f, 0.0f))) {
         state.show_docs = true;
     }
 
@@ -4082,12 +4085,10 @@ void draw_titlebar(AppState& state, thrystr::gui::WindowHandle window) {
         state.path[0] == '\0'
             ? std::string("source: none")
             : std::string("source: ") + std::filesystem::path(state.path).filename().string();
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
-                       source_name.c_str());
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "%s", source_name.c_str());
 
     ImGui::SameLine();
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
-                       state.status.c_str());
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "%s", state.status.c_str());
 
     const float controls_width = window_control_group_width(3);
     ImGui::SetCursorPos(ImVec2(viewport.x - controls_width, 8.0f));
@@ -4126,13 +4127,12 @@ bool value_bar_double(const char* label, double* value, double step_per_pixel,
     }
 
     auto* draw = ImGui::GetWindowDrawList();
-    const ImU32 fill = active    ? skald::tokens::surface::control_hi
-                       : hovered ? skald::tokens::surface::control
-                                 : skald::tokens::surface::panel_alt;
-    draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), fill,
-                        skald::tokens::radii::ctrl);
-    draw->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), skald::tokens::border::default_,
-                  skald::tokens::radii::ctrl);
+    const ImU32 fill = active    ? palette::surface::control_hi
+                       : hovered ? palette::surface::control
+                                 : palette::surface::panel_alt;
+    draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), fill, palette::radii::ctrl);
+    draw->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), palette::border::default_,
+                  palette::radii::ctrl);
     char text[128] = {};
     std::snprintf(text, sizeof(text), format, *value);
     if (mono_font) {
@@ -4141,12 +4141,12 @@ bool value_bar_double(const char* label, double* value, double step_per_pixel,
     const ImVec2 text_size = ImGui::CalcTextSize(text);
     draw->AddText(
         ImVec2(pos.x + size.x - text_size.x - 10.0f, pos.y + (size.y - text_size.y) * 0.5f),
-        skald::tokens::ink::primary, text);
+        palette::ink::primary, text);
     if (mono_font) {
         ImGui::PopFont();
     }
     if (hovered) {
-        skald::Tooltip("Drag left or right to adjust");
+        thrystr::gui::tooltip("Drag left or right to adjust");
     }
     ImGui::PopID();
     return changed;
@@ -4163,7 +4163,7 @@ bool value_bar_int(const char* label, int* value, double step_per_pixel,
 }
 
 void draw_value_mapper_stack(AppState& state) {
-    skald::SectionHeader("Value Mappers");
+    thrystr::gui::section_header("Value Mappers");
 
     bool mapper_changed = false;
     int remove_index = -1;
@@ -4218,18 +4218,19 @@ void draw_value_mapper_stack(AppState& state) {
                                                 0.1f, nullptr, nullptr, "%.6f");
 
             ImGui::TableSetColumnIndex(3);
-            if (skald::IconButton(skald::icons::kChevronRight, "Move up", 22.0f) && i > 0) {
+            if (thrystr::gui::icon_button(thrystr::gui::icons::kChevronRight, "Move up", 22.0f) &&
+                i > 0) {
                 move_from = static_cast<int>(i);
                 move_to = static_cast<int>(i - 1);
             }
             ImGui::SameLine();
-            if (skald::IconButton(skald::icons::kChevronDown, "Move down", 22.0f) &&
+            if (thrystr::gui::icon_button(thrystr::gui::icons::kChevronDown, "Move down", 22.0f) &&
                 i + 1 < state.mappers.size()) {
                 move_from = static_cast<int>(i);
                 move_to = static_cast<int>(i + 1);
             }
             ImGui::SameLine();
-            if (skald::IconButton(skald::icons::kX, "Remove", 22.0f)) {
+            if (thrystr::gui::icon_button(thrystr::gui::icons::kX, "Remove", 22.0f)) {
                 remove_index = static_cast<int>(i);
             }
             ImGui::PopID();
@@ -4247,27 +4248,27 @@ void draw_value_mapper_stack(AppState& state) {
         mapper_changed = true;
     }
 
-    if (skald::GhostButton("+ add")) {
+    if (thrystr::gui::ghost_button("+ add")) {
         state.mappers.push_back({thrystr::ValueMapperKind::Add, 1.0, true});
         mapper_changed = true;
     }
     ImGui::SameLine();
-    if (skald::GhostButton("- sub")) {
+    if (thrystr::gui::ghost_button("- sub")) {
         state.mappers.push_back({thrystr::ValueMapperKind::Subtract, 1.0, true});
         mapper_changed = true;
     }
     ImGui::SameLine();
-    if (skald::GhostButton("* mul")) {
+    if (thrystr::gui::ghost_button("* mul")) {
         state.mappers.push_back({thrystr::ValueMapperKind::Multiply, 2.0, true});
         mapper_changed = true;
     }
     ImGui::SameLine();
-    if (skald::GhostButton("/ div")) {
+    if (thrystr::gui::ghost_button("/ div")) {
         state.mappers.push_back({thrystr::ValueMapperKind::Divide, 2.0, true});
         mapper_changed = true;
     }
 
-    skald::KvRow("tail", "uint %% 256 -> [-1, 1)");
+    thrystr::gui::key_value_row("tail", "uint %% 256 -> [-1, 1)");
 
     if (mapper_changed) {
         reload_if_file_selected(state);
@@ -4287,35 +4288,36 @@ void draw_inspector_overlay(AppState& state) {
         return;
     }
 
-    skald::SectionHeader("Inspector");
-    skald::SectionHeader("Analysis");
+    thrystr::gui::section_header("Inspector");
+    thrystr::gui::section_header("Analysis");
     if (state.fonts.mono) {
         ImGui::PushFont(state.fonts.mono);
     }
     if (state.analysis) {
         const thrystr::Analysis& a = *state.analysis;
-        skald::KvRow("source", "%s", format_bytes(a.source_size).c_str());
-        skald::KvRow("windows", "%s", format_count(a.window_count).c_str());
-        skald::KvRow("offset", "%s", format_count(a.window.offset).c_str());
-        skald::KvRow("window samples", "%s", format_count(a.window.length).c_str());
-        skald::KvRow("max delta", "%u", static_cast<unsigned>(a.window.max_delta));
-        skald::KvRow("x scale", "%.3f", static_cast<double>(a.x_scale));
-        skald::KvRow("points", "%s", format_count(source_sample_count(state)).c_str());
-        skald::KvRow("mappers", "%s", format_count(a.mappers.size()).c_str());
+        thrystr::gui::key_value_row("source", "%s", format_bytes(a.source_size).c_str());
+        thrystr::gui::key_value_row("windows", "%s", format_count(a.window_count).c_str());
+        thrystr::gui::key_value_row("offset", "%s", format_count(a.window.offset).c_str());
+        thrystr::gui::key_value_row("window samples", "%s", format_count(a.window.length).c_str());
+        thrystr::gui::key_value_row("max delta", "%u", static_cast<unsigned>(a.window.max_delta));
+        thrystr::gui::key_value_row("x scale", "%.3f", static_cast<double>(a.x_scale));
+        thrystr::gui::key_value_row("points", "%s",
+                                    format_count(source_sample_count(state)).c_str());
+        thrystr::gui::key_value_row("mappers", "%s", format_count(a.mappers.size()).c_str());
     } else {
-        skald::KvRowStatus("state", "empty", skald::BadgeTone::Muted);
+        thrystr::gui::status_row("state", "empty", thrystr::gui::StatusTone::Muted);
     }
 
     if (state.analysis) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Legacy Fit");
+        thrystr::gui::section_header("Legacy Fit");
         const thrystr::Analysis& a = *state.analysis;
-        skald::KvRow("scale", "%.4f", a.wave_scale);
-        skald::KvRow("sine hits", "%s", format_count(a.sine.hits).c_str());
-        skald::KvRow("sine phase", "%.4f", a.sine.phase_radians);
-        skald::KvRow("cos hits", "%s", format_count(a.cosine.hits).c_str());
-        skald::KvRow("cos phase", "%.4f", a.cosine.phase_radians);
-        skald::KvRow("tested", "%s", format_count(a.sine.tested_points).c_str());
+        thrystr::gui::key_value_row("scale", "%.4f", a.wave_scale);
+        thrystr::gui::key_value_row("sine hits", "%s", format_count(a.sine.hits).c_str());
+        thrystr::gui::key_value_row("sine phase", "%.4f", a.sine.phase_radians);
+        thrystr::gui::key_value_row("cos hits", "%s", format_count(a.cosine.hits).c_str());
+        thrystr::gui::key_value_row("cos phase", "%.4f", a.cosine.phase_radians);
+        thrystr::gui::key_value_row("tested", "%s", format_count(a.sine.tested_points).c_str());
     }
     if (state.fonts.mono) {
         ImGui::PopFont();
@@ -4331,19 +4333,19 @@ void draw_settings_dialog(AppState& state) {
 
     bool open = state.show_settings;
     ImGui::SetNextWindowSize(kSettingsDialogSize, ImGuiCond_Appearing);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, skald::tokens::to_vec4(skald::tokens::surface::panel));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, skald::tokens::pad::window);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skald::tokens::radii::modal);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, palette::to_vec4(palette::surface::panel));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, palette::pad::window);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, palette::radii::modal);
     if (ImGui::BeginPopupModal("Settings", &open, ImGuiWindowFlags_NoCollapse)) {
-        skald::SectionHeader("Overlays");
-        skald::PillToggle("Inspector overlay", &state.show_inspector_overlay);
+        thrystr::gui::section_header("Overlays");
+        thrystr::gui::pill_toggle("Inspector overlay", &state.show_inspector_overlay);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Render");
-        skald::PillToggle("Data points", &state.show_points);
+        thrystr::gui::section_header("Render");
+        thrystr::gui::pill_toggle("Data points", &state.show_points);
         ImGui::SameLine();
-        skald::PillToggle("Data lines", &state.show_lines);
+        thrystr::gui::pill_toggle("Data lines", &state.show_lines);
         ImGui::SameLine();
-        skald::PillToggle("Reconstruction", &state.show_reconstruction_only);
+        thrystr::gui::pill_toggle("Reconstruction", &state.show_reconstruction_only);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         double zoom_x = static_cast<double>(state.zoom_x);
         double zoom_y = static_cast<double>(state.zoom_y);
@@ -4354,7 +4356,7 @@ void draw_settings_dialog(AppState& state) {
             state.zoom_y = static_cast<float>(zoom_y);
         }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        if (skald::AccentButton("Done", ImVec2(96.0f, 0.0f))) {
+        if (thrystr::gui::accent_button("Done", ImVec2(96.0f, 0.0f))) {
             state.show_settings = false;
             ImGui::CloseCurrentPopup();
         }
@@ -4379,26 +4381,34 @@ void draw_fit_validation_overlay(AppState& state) {
     }
 
     const thrystr::app::ValidationReport& report = state.fit_validation;
-    skald::KvRowStatus("coverage", report.pass ? "PASS" : "FAIL",
-                       report.pass ? skald::BadgeTone::Success : skald::BadgeTone::Destructive);
-    skald::KvRow("sections", "%s", format_count(state.fitted_sections.size()).c_str());
+    thrystr::gui::status_row("coverage", report.pass ? "PASS" : "FAIL",
+                             report.pass ? thrystr::gui::StatusTone::Success
+                                         : thrystr::gui::StatusTone::Destructive);
+    thrystr::gui::key_value_row("sections", "%s",
+                                format_count(state.fitted_sections.size()).c_str());
     if (state.fitted_workspace_valid) {
-        skald::KvRow("tracks", "%s%s",
-                     format_count(data_track_count(state.fitted_workspace)).c_str(),
-                     state.fitted_workspace_used_parity ? " + parity" : "");
+        thrystr::gui::key_value_row("tracks", "%s%s",
+                                    format_count(data_track_count(state.fitted_workspace)).c_str(),
+                                    state.fitted_workspace_used_parity ? " + parity" : "");
     }
-    skald::KvRow("samples", "%s", format_count(report.checked_samples).c_str());
-    skald::KvRow("max residual", "%.8f", report.max_residual);
-    skald::KvRow("mean residual", "%.8f", report.mean_residual);
+    thrystr::gui::key_value_row("samples", "%s", format_count(report.checked_samples).c_str());
+    thrystr::gui::key_value_row("max residual", "%.8f", report.max_residual);
+    thrystr::gui::key_value_row("mean residual", "%.8f", report.mean_residual);
     const EncodingEstimate encoding = estimate_encoded_output_size(state);
     if (encoding.encoded_bytes > 0u) {
-        skald::KvRow("encoded size", "%s", format_bytes(encoding.encoded_bytes).c_str());
-        skald::KvRow("source ratio", "%s %s", format_percent(encoding.source_ratio).c_str(),
-                     encoding_target_label(encoding.source_ratio));
-        skald::KvRow("covered ratio", "%s", format_percent(encoding.covered_ratio).c_str());
-        skald::KvRow("curve points", "%s", format_count(encoding.curve_points).c_str());
-        skald::KvRow("data sections", "%s", format_count(encoding.data_sections).c_str());
-        skald::KvRow("parity sections", "%s", format_count(encoding.parity_sections).c_str());
+        thrystr::gui::key_value_row("encoded size", "%s",
+                                    format_bytes(encoding.encoded_bytes).c_str());
+        thrystr::gui::key_value_row("source ratio", "%s %s",
+                                    format_percent(encoding.source_ratio).c_str(),
+                                    encoding_target_label(encoding.source_ratio));
+        thrystr::gui::key_value_row("covered ratio", "%s",
+                                    format_percent(encoding.covered_ratio).c_str());
+        thrystr::gui::key_value_row("curve points", "%s",
+                                    format_count(encoding.curve_points).c_str());
+        thrystr::gui::key_value_row("data sections", "%s",
+                                    format_count(encoding.data_sections).c_str());
+        thrystr::gui::key_value_row("parity sections", "%s",
+                                    format_count(encoding.parity_sections).c_str());
     }
 
     if (ImGui::BeginTable("##fit_validation_sections", 6,
@@ -4426,16 +4436,16 @@ void draw_fit_validation_overlay(AppState& state) {
             ImGui::TableSetColumnIndex(4);
             ImGui::Text("%.4f", section.wave_wavelength_nm);
             ImGui::TableSetColumnIndex(5);
-            ImGui::TextColored(skald::tokens::to_vec4(section.max_residual > section.fit_tolerance
-                                                          ? skald::tokens::status::destructive
-                                                          : skald::tokens::ink::primary),
+            ImGui::TextColored(palette::to_vec4(section.max_residual > section.fit_tolerance
+                                                    ? palette::status::destructive
+                                                    : palette::ink::primary),
                                "%.8f", section.max_residual);
         }
         ImGui::EndTable();
     }
 
     if (!report.issues.empty()) {
-        skald::SectionHeader("Issues");
+        thrystr::gui::section_header("Issues");
         if (ImGui::BeginChild("##fit_validation_issues", ImVec2(0.0f, 100.0f), false)) {
             for (const thrystr::app::ValidationIssue& issue : report.issues) {
                 ImGui::TextWrapped("%s @ sample %zu", issue.message.c_str(), issue.sample_index);
@@ -4458,7 +4468,7 @@ void draw_activity_spinner(float radius, ImU32 color) {
         const float alpha = 0.18f + 0.82f * t;
         const float x = center.x + std::cos(angle) * radius * 0.62f;
         const float y = center.y + std::sin(angle) * radius * 0.62f;
-        draw->AddCircleFilled(ImVec2(x, y), 2.4f, skald::tokens::with_alpha(color, alpha), 12);
+        draw->AddCircleFilled(ImVec2(x, y), 2.4f, palette::with_alpha(color, alpha), 12);
     }
     ImGui::Dummy(ImVec2(radius * 2.0f, radius * 2.0f));
 }
@@ -4481,12 +4491,12 @@ void draw_auto_fit_activity_dialog(AppState& state) {
     }
 
     ImGui::BeginGroup();
-    draw_activity_spinner(14.0f, skald::tokens::status::info);
+    draw_activity_spinner(14.0f, palette::status::info);
     ImGui::EndGroup();
     ImGui::SameLine();
     ImGui::BeginGroup();
     ImGui::TextUnformatted(progress.multi_track ? "Auto-Fit Tracks" : "Auto-Fit All");
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "%s",
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "%s",
                        progress.active_operation.empty() ? "working"
                                                          : progress.active_operation.c_str());
     ImGui::EndGroup();
@@ -4498,27 +4508,30 @@ void draw_auto_fit_activity_dialog(AppState& state) {
                                          0.0f, 1.0f);
     ImGui::ProgressBar(ratio, ImVec2(-FLT_MIN, 0.0f));
     if (progress.total_segments > 0u) {
-        skald::KvRow("segment", "%s/%s", format_count(progress.completed_segments).c_str(),
-                     format_count(progress.total_segments).c_str());
-        skald::KvRow("active", "%s/%s", format_count(progress.active_segment_index + 1u).c_str(),
-                     format_count(progress.total_segments).c_str());
+        thrystr::gui::key_value_row("segment", "%s/%s",
+                                    format_count(progress.completed_segments).c_str(),
+                                    format_count(progress.total_segments).c_str());
+        thrystr::gui::key_value_row("active", "%s/%s",
+                                    format_count(progress.active_segment_index + 1u).c_str(),
+                                    format_count(progress.total_segments).c_str());
     }
     if (progress.total_samples > 0u) {
-        skald::KvRow("samples", "%s/%s", format_count(progress.processed_samples).c_str(),
-                     format_count(progress.total_samples).c_str());
+        thrystr::gui::key_value_row("samples", "%s/%s",
+                                    format_count(progress.processed_samples).c_str(),
+                                    format_count(progress.total_samples).c_str());
     }
     if (progress.active_segment_length > 0u) {
-        skald::KvRow(
+        thrystr::gui::key_value_row(
             "range", "%s..%s", format_count(progress.active_segment_start).c_str(),
             format_count(progress.active_segment_start + progress.active_segment_length - 1u)
                 .c_str());
     }
-    if (skald::GhostButton("Cancel Fit", ImVec2(112.0f, 0.0f))) {
+    if (thrystr::gui::ghost_button("Cancel Fit", ImVec2(112.0f, 0.0f))) {
         cancel_auto_fit(state);
     }
 
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    skald::SectionHeader("Operations");
+    thrystr::gui::section_header("Operations");
     if (ImGui::BeginChild("##auto_fit_activity_log", ImVec2(0.0f, 0.0f), true,
                           ImGuiWindowFlags_HorizontalScrollbar)) {
         if (state.fonts.mono) {
@@ -4528,7 +4541,7 @@ void draw_auto_fit_activity_dialog(AppState& state) {
             ImGui::TextUnformatted(line.c_str());
         }
         if (progress.activity_log.empty()) {
-            ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted),
+            ImGui::TextColored(palette::to_vec4(palette::ink::muted),
                                "waiting for worker activity");
         } else {
             ImGui::SetScrollHereY(1.0f);
@@ -4556,20 +4569,20 @@ StartupAction draw_splash(AppState& state) {
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
                      ImGuiWindowFlags_NoScrollWithMouse);
 
-    const std::array<skald::SplashAction, 3> actions = {{
+    const std::array<thrystr::gui::SplashAction, 3> actions = {{
         {"New workspace", "Ctrl+N"},
         {"Open workspace", ""},
         {"Load source", ""},
     }};
-    const skald::SplashChoice splash_choice =
-        skald::Splash("thrystr", "Scalar function workspace", {},
-                      std::span<const skald::SplashAction>(actions.data(), actions.size()),
-                      static_cast<ImTextureID>(state.splash_hero_texture), state.splash_hero_size,
-                      state.fonts.hero);
+    const thrystr::gui::SplashChoice splash_choice = thrystr::gui::splash(
+        "thrystr", "Scalar function workspace", {},
+        std::span<const thrystr::gui::SplashAction>(actions.data(), actions.size()),
+        static_cast<ImTextureID>(state.splash_hero_texture), state.splash_hero_size,
+        state.fonts.hero);
 
     ImGui::End();
 
-    if (splash_choice.kind == skald::SplashChoice::Kind::Action) {
+    if (splash_choice.kind == thrystr::gui::SplashChoice::Kind::Action) {
         switch (splash_choice.index) {
         case 0:
             return StartupAction::NewWorkspace;
@@ -4706,23 +4719,23 @@ void draw_entity_toolbox(AppState& state) {
     }
     Entity* selected = find_entity(state, state.selected_entity_id);
 
-    skald::SectionHeader("Properties");
+    thrystr::gui::section_header("Properties");
     draw_property_tabs(state, selected);
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
     Entity* data = data_entity(state);
     switch (state.property_tab) {
     case PropertyTab::Entities:
-        skald::SectionHeader("Layers");
-        if (skald::AccentButton("+ Function", ImVec2(112.0f, 0.0f))) {
+        thrystr::gui::section_header("Layers");
+        if (thrystr::gui::accent_button("+ Function", ImVec2(112.0f, 0.0f))) {
             create_wave_entity(state);
         }
         ImGui::SameLine();
-        if (skald::GhostButton("Fit Function", ImVec2(116.0f, 0.0f))) {
+        if (thrystr::gui::ghost_button("Fit Function", ImVec2(116.0f, 0.0f))) {
             create_interpolated_wave(state);
         }
         ImGui::SameLine();
-        if (skald::GhostButton("Section", ImVec2(92.0f, 0.0f))) {
+        if (thrystr::gui::ghost_button("Section", ImVec2(92.0f, 0.0f))) {
             create_section(state);
         }
 
@@ -4741,25 +4754,28 @@ void draw_entity_toolbox(AppState& state) {
         selected = find_entity(state, state.selected_entity_id);
         if (selected) {
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            skald::SectionHeader("Selection");
+            thrystr::gui::section_header("Selection");
             sync_entity_name(state);
             if (ImGui::InputText("Name", state.entity_name, sizeof(state.entity_name))) {
                 selected->name = state.entity_name;
             }
-            skald::PillToggle("Visible", &selected->visible);
+            thrystr::gui::pill_toggle("Visible", &selected->visible);
         }
         break;
 
     case PropertyTab::Data:
-        skald::SectionHeader("Data");
+        thrystr::gui::section_header("Data");
         if (state.analysis) {
             const thrystr::Analysis& a = *state.analysis;
-            skald::KvRow("points", "%s", format_count(source_sample_count(state)).c_str());
-            skald::KvRow("loaded blocks", "%s", format_count(state.lazy_blocks.size()).c_str());
-            skald::KvRow("block size", "%s", format_bytes(lazy_block_bytes(state)).c_str());
-            skald::KvRow("source", "%s", format_bytes(a.source_size).c_str());
+            thrystr::gui::key_value_row("points", "%s",
+                                        format_count(source_sample_count(state)).c_str());
+            thrystr::gui::key_value_row("loaded blocks", "%s",
+                                        format_count(state.lazy_blocks.size()).c_str());
+            thrystr::gui::key_value_row("block size", "%s",
+                                        format_bytes(lazy_block_bytes(state)).c_str());
+            thrystr::gui::key_value_row("source", "%s", format_bytes(a.source_size).c_str());
         } else {
-            skald::KvRowStatus("source", "none", skald::BadgeTone::Muted);
+            thrystr::gui::status_row("source", "none", thrystr::gui::StatusTone::Muted);
         }
         if (data && value_bar_double("point spacing nm", &data->data.spatial_period_nm, 0.01,
                                      "%.6f", state.fonts.mono)) {
@@ -4767,7 +4783,8 @@ void draw_entity_toolbox(AppState& state) {
         }
         if (data) {
             data->data.sample_bits = normalize_sample_bits(data->data.sample_bits);
-            skald::KvRow("point width", "%u-bit", static_cast<unsigned>(data->data.sample_bits));
+            thrystr::gui::key_value_row("point width", "%u-bit",
+                                        static_cast<unsigned>(data->data.sample_bits));
             bool sample_width_changed = false;
             for (const std::uint8_t bits :
                  {std::uint8_t{8}, std::uint8_t{16}, std::uint8_t{32}, std::uint8_t{64}}) {
@@ -4792,7 +4809,7 @@ void draw_entity_toolbox(AppState& state) {
         }
 
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Load Params");
+        thrystr::gui::section_header("Load Params");
         {
             bool params_changed = false;
             bool lazy_block_changed = false;
@@ -4817,7 +4834,7 @@ void draw_entity_toolbox(AppState& state) {
             if (params_changed) {
                 refresh_analysis_params(state);
             }
-            if (skald::GhostButton("Fit Phases", ImVec2(112.0f, 0.0f))) {
+            if (thrystr::gui::ghost_button("Fit Phases", ImVec2(112.0f, 0.0f))) {
                 fit_wave_phases(state);
             }
         }
@@ -4825,17 +4842,18 @@ void draw_entity_toolbox(AppState& state) {
 
     case PropertyTab::Wave:
         if (!selected || selected->type != EntityType::Wave) {
-            skald::KvRowStatus("function", "select a function", skald::BadgeTone::Muted);
+            thrystr::gui::status_row("function", "select a function",
+                                     thrystr::gui::StatusTone::Muted);
             break;
         }
-        skald::SectionHeader("Function");
+        thrystr::gui::section_header("Function");
         sync_entity_name(state);
         if (ImGui::InputText("Name", state.entity_name, sizeof(state.entity_name))) {
             selected->name = state.entity_name;
         }
-        skald::PillToggle("Visible", &selected->visible);
+        thrystr::gui::pill_toggle("Visible", &selected->visible);
         wave_function_selector("Function", &selected->wave.function);
-        skald::PillToggle("Secondary function", &selected->wave.use_secondary_function);
+        thrystr::gui::pill_toggle("Secondary function", &selected->wave.use_secondary_function);
         if (selected->wave.use_secondary_function) {
             wave_function_selector("Secondary", &selected->wave.secondary_function);
             value_bar_double("secondary amplitude", &selected->wave.secondary_amplitude, 0.01,
@@ -4849,9 +4867,9 @@ void draw_entity_toolbox(AppState& state) {
         value_bar_double("phase nm", &selected->wave.phase_nm, 0.10, "%.4f", state.fonts.mono);
         value_bar_double("z rotation deg", &selected->wave.rotation_degrees, 0.25, "%.3f",
                          state.fonts.mono);
-        skald::KvRow("modifiers", "%s",
-                     format_count(selected->wave.wavelength_modifiers.size()).c_str());
-        if (skald::GhostButton("Fit Selection", ImVec2(124.0f, 0.0f))) {
+        thrystr::gui::key_value_row(
+            "modifiers", "%s", format_count(selected->wave.wavelength_modifiers.size()).c_str());
+        if (thrystr::gui::ghost_button("Fit Selection", ImVec2(124.0f, 0.0f))) {
             const WaveFitResult fit = fit_wave_to_selection(state, selected->wave);
             selected->wave.wavelength_nm = fit.wavelength_nm;
             selected->wave.phase_nm = fit.phase_nm;
@@ -4864,16 +4882,16 @@ void draw_entity_toolbox(AppState& state) {
                            " wavelength keys";
         }
         ImGui::SameLine();
-        if (skald::GhostButton("Fit Points", ImVec2(104.0f, 0.0f))) {
+        if (thrystr::gui::ghost_button("Fit Points", ImVec2(104.0f, 0.0f))) {
             fit_selected_points_to_wave(state);
         }
         break;
 
     case PropertyTab::Fit:
-        skald::SectionHeader("X-Line Section");
+        thrystr::gui::section_header("X-Line Section");
         if (state.analysis && source_sample_count(state) > 0u) {
             if (!state.segment.active) {
-                if (skald::AccentButton("Create Section", ImVec2(132.0f, 0.0f))) {
+                if (thrystr::gui::accent_button("Create Section", ImVec2(132.0f, 0.0f))) {
                     create_section(state);
                 }
             } else {
@@ -4906,16 +4924,17 @@ void draw_entity_toolbox(AppState& state) {
                     clamp_segment(state);
                 }
                 const auto [first, last] = normalized_selection(state);
-                skald::KvRow("span", "%.3f nm", static_cast<double>(last - first) * period);
-                if (skald::GhostButton("Select All", ImVec2(104.0f, 0.0f))) {
+                thrystr::gui::key_value_row("span", "%.3f nm",
+                                            static_cast<double>(last - first) * period);
+                if (thrystr::gui::ghost_button("Select All", ImVec2(104.0f, 0.0f))) {
                     create_section(state);
                 }
                 ImGui::SameLine();
                 if (state.auto_fit_job.running.load()) {
-                    if (skald::GhostButton("Cancel Fit", ImVec2(108.0f, 0.0f))) {
+                    if (thrystr::gui::ghost_button("Cancel Fit", ImVec2(108.0f, 0.0f))) {
                         cancel_auto_fit(state);
                     }
-                    skald::KvRowStatus("auto-fit", "running", skald::BadgeTone::Info);
+                    thrystr::gui::status_row("auto-fit", "running", thrystr::gui::StatusTone::Info);
                     std::size_t completed_segments = 0u;
                     std::size_t total_segments = 0u;
                     std::size_t processed_samples = 0u;
@@ -4934,99 +4953,105 @@ void draw_entity_toolbox(AppState& state) {
                         active_operation = state.auto_fit_job.active_operation;
                     }
                     if (!active_operation.empty()) {
-                        skald::KvRow("operation", "%s", active_operation.c_str());
+                        thrystr::gui::key_value_row("operation", "%s", active_operation.c_str());
                     }
                     if (total_segments > 0u) {
                         const std::string segment_text =
                             format_count(completed_segments) + "/" + format_count(total_segments);
-                        skald::KvRow("segments", "%s", segment_text.c_str());
+                        thrystr::gui::key_value_row("segments", "%s", segment_text.c_str());
                     }
                     if (total_samples > 0u) {
                         const std::string sample_text =
                             format_count(processed_samples) + "/" + format_count(total_samples);
-                        skald::KvRow("samples", "%s", sample_text.c_str());
+                        thrystr::gui::key_value_row("samples", "%s", sample_text.c_str());
                     }
                     if (active_length > 0u) {
-                        skald::KvRow("active range", "%s..%s", format_count(active_start).c_str(),
-                                     format_count(active_start + active_length - 1u).c_str());
+                        thrystr::gui::key_value_row(
+                            "active range", "%s..%s", format_count(active_start).c_str(),
+                            format_count(active_start + active_length - 1u).c_str());
                     }
-                } else if (skald::AccentButton("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
+                } else if (thrystr::gui::accent_button("Auto-Fit All", ImVec2(126.0f, 0.0f))) {
                     auto_fit_current_range(state);
                 }
                 ImGui::SameLine();
                 if (!state.auto_fit_job.running.load() &&
-                    skald::GhostButton("Auto-Fit Tracks", ImVec2(138.0f, 0.0f))) {
+                    thrystr::gui::ghost_button("Auto-Fit Tracks", ImVec2(138.0f, 0.0f))) {
                     auto_fit_current_range(state, true);
                 }
                 if (!state.fitted_sections.empty()) {
                     const EncodingEstimate encoding = estimate_encoded_output_size(state);
-                    skald::KvRow("fit sections", "%s",
-                                 format_count(state.fitted_sections.size()).c_str());
+                    thrystr::gui::key_value_row("fit sections", "%s",
+                                                format_count(state.fitted_sections.size()).c_str());
                     if (state.fitted_workspace_valid) {
-                        skald::KvRow("fit tracks", "%s%s",
-                                     format_count(encoding.data_tracks).c_str(),
-                                     state.fitted_workspace_used_parity ? " + parity" : "");
+                        thrystr::gui::key_value_row(
+                            "fit tracks", "%s%s", format_count(encoding.data_tracks).c_str(),
+                            state.fitted_workspace_used_parity ? " + parity" : "");
                     }
-                    skald::KvRow("fit samples", "%s",
-                                 format_count(state.fit_validation.checked_samples).c_str());
-                    skald::KvRow("fit residual", "%.6f", state.fit_validation.max_residual);
+                    thrystr::gui::key_value_row(
+                        "fit samples", "%s",
+                        format_count(state.fit_validation.checked_samples).c_str());
+                    thrystr::gui::key_value_row("fit residual", "%.6f",
+                                                state.fit_validation.max_residual);
                     if (encoding.encoded_bytes > 0u) {
-                        skald::KvRow("encoded size", "%s",
-                                     format_bytes(encoding.encoded_bytes).c_str());
-                        skald::KvRow("source ratio", "%s %s",
-                                     format_percent(encoding.source_ratio).c_str(),
-                                     encoding_target_label(encoding.source_ratio));
-                        skald::KvRow("curve points", "%s",
-                                     format_count(encoding.curve_points).c_str());
-                        skald::KvRow("parity sections", "%s",
-                                     format_count(encoding.parity_sections).c_str());
+                        thrystr::gui::key_value_row("encoded size", "%s",
+                                                    format_bytes(encoding.encoded_bytes).c_str());
+                        thrystr::gui::key_value_row("source ratio", "%s %s",
+                                                    format_percent(encoding.source_ratio).c_str(),
+                                                    encoding_target_label(encoding.source_ratio));
+                        thrystr::gui::key_value_row("curve points", "%s",
+                                                    format_count(encoding.curve_points).c_str());
+                        thrystr::gui::key_value_row("parity sections", "%s",
+                                                    format_count(encoding.parity_sections).c_str());
                     }
-                    if (skald::GhostButton("Validate Fit", ImVec2(118.0f, 0.0f))) {
+                    if (thrystr::gui::ghost_button("Validate Fit", ImVec2(118.0f, 0.0f))) {
                         state.fit_validation = validate_fitted_sections(state);
                         state.show_fit_validation = true;
                     }
                     ImGui::SameLine();
-                    skald::PillToggle("Reconstruction", &state.show_reconstruction_only);
+                    thrystr::gui::pill_toggle("Reconstruction", &state.show_reconstruction_only);
                 }
             }
         } else {
-            skald::KvRowStatus("section", "no data", skald::BadgeTone::Muted);
+            thrystr::gui::status_row("section", "no data", thrystr::gui::StatusTone::Muted);
         }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Selected Point Fit");
-        skald::KvRow("selected points", "%s",
-                     format_count(state.selected_data_points.size()).c_str());
-        skald::PillToggle("Function combinations", &state.fit_function_combinations);
-        if (skald::AccentButton("Fit Selected Points", ImVec2(158.0f, 0.0f))) {
+        thrystr::gui::section_header("Selected Point Fit");
+        thrystr::gui::key_value_row("selected points", "%s",
+                                    format_count(state.selected_data_points.size()).c_str());
+        thrystr::gui::pill_toggle("Function combinations", &state.fit_function_combinations);
+        if (thrystr::gui::accent_button("Fit Selected Points", ImVec2(158.0f, 0.0f))) {
             fit_selected_points_to_wave(state);
         }
         break;
 
     case PropertyTab::Points:
-        skald::SectionHeader("Point Selection");
-        skald::PillToggle("Point pick mode", &state.point_selection_mode);
+        thrystr::gui::section_header("Point Selection");
+        thrystr::gui::pill_toggle("Point pick mode", &state.point_selection_mode);
         if (state.point_selection_mode) {
             state.segment_selection_mode = false;
         }
-        skald::KvRow("selected", "%s", format_count(state.selected_data_points.size()).c_str());
+        thrystr::gui::key_value_row("selected", "%s",
+                                    format_count(state.selected_data_points.size()).c_str());
         if (!state.selected_data_points.empty()) {
             normalize_selected_data_points(state);
-            skald::KvRow("first", "%s", format_count(state.selected_data_points.front()).c_str());
-            skald::KvRow("last", "%s", format_count(state.selected_data_points.back()).c_str());
+            thrystr::gui::key_value_row("first", "%s",
+                                        format_count(state.selected_data_points.front()).c_str());
+            thrystr::gui::key_value_row("last", "%s",
+                                        format_count(state.selected_data_points.back()).c_str());
         }
-        if (skald::GhostButton("Clear Points", ImVec2(118.0f, 0.0f))) {
+        if (thrystr::gui::ghost_button("Clear Points", ImVec2(118.0f, 0.0f))) {
             state.selected_data_points.clear();
         }
         ImGui::SameLine();
-        if (skald::AccentButton("Fit Points", ImVec2(104.0f, 0.0f))) {
+        if (thrystr::gui::accent_button("Fit Points", ImVec2(104.0f, 0.0f))) {
             fit_selected_points_to_wave(state);
         }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        skald::SectionHeader("Random Sampling");
+        thrystr::gui::section_header("Random Sampling");
         value_bar_int("sample count", &state.random_sample_count, 1.0, state.fonts.mono);
         ImGui::SetNextItemWidth(-FLT_MIN);
         ImGui::InputScalar("seed", ImGuiDataType_U64, &state.random_sample_seed);
-        if (skald::AccentButton("Load Random Sampling", ImVec2(176.0f, 0.0f))) {
+        if (thrystr::gui::accent_button("Load Random Sampling", ImVec2(176.0f, 0.0f))) {
             select_random_sample_points(state);
         }
         break;
@@ -5036,12 +5061,12 @@ void draw_entity_toolbox(AppState& state) {
         break;
 
     case PropertyTab::View:
-        skald::SectionHeader("Render");
-        skald::PillToggle("Data points", &state.show_points);
+        thrystr::gui::section_header("Render");
+        thrystr::gui::pill_toggle("Data points", &state.show_points);
         ImGui::SameLine();
-        skald::PillToggle("Data lines", &state.show_lines);
+        thrystr::gui::pill_toggle("Data lines", &state.show_lines);
         ImGui::SameLine();
-        skald::PillToggle("Reconstruction", &state.show_reconstruction_only);
+        thrystr::gui::pill_toggle("Reconstruction", &state.show_reconstruction_only);
         {
             double zoom_x = static_cast<double>(state.zoom_x);
             double zoom_y = static_cast<double>(state.zoom_y);
@@ -5052,7 +5077,7 @@ void draw_entity_toolbox(AppState& state) {
                 state.zoom_y = static_cast<float>(zoom_y);
             }
         }
-        skald::PillToggle("Wheel scroll", &state.wheel_scroll_mode);
+        thrystr::gui::pill_toggle("Wheel scroll", &state.wheel_scroll_mode);
         break;
     }
 
@@ -5153,8 +5178,8 @@ void draw_selected_data_point_markers(ImDrawList* draw, const AppState& state, s
             const float x = plot_left + static_cast<float>(index) * x_step;
             const float y = y_for_value(static_cast<float>(*scalar), plot_top, plot_bottom, y_zoom);
             draw->AddCircleFilled(ImVec2(x, y), 5.0f,
-                                  skald::tokens::with_alpha(skald::tokens::accents::gold, 0.92f));
-            draw->AddCircle(ImVec2(x, y), 7.0f, skald::tokens::ink::primary, 0, 1.4f);
+                                  palette::with_alpha(palette::accents::gold, 0.92f));
+            draw->AddCircle(ImVec2(x, y), 7.0f, palette::ink::primary, 0, 1.4f);
         }
     }
 }
@@ -5215,17 +5240,14 @@ void apply_custom_playback_speed(AppState& state) {
 
 bool playback_speed_button(const char* label, bool selected, float width) {
     if (selected) {
-        ImGui::PushStyleColor(ImGuiCol_Button, skald::tokens::to_vec4(skald::tokens::status::info));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              skald::tokens::to_vec4(skald::tokens::status::info));
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              skald::tokens::to_vec4(skald::tokens::surface::window));
+        ImGui::PushStyleColor(ImGuiCol_Button, palette::to_vec4(palette::status::info));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette::to_vec4(palette::status::info));
+        ImGui::PushStyleColor(ImGuiCol_Text, palette::to_vec4(palette::surface::window));
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Button,
-                              skald::tokens::to_vec4(skald::tokens::surface::control));
+        ImGui::PushStyleColor(ImGuiCol_Button, palette::to_vec4(palette::surface::control));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              skald::tokens::to_vec4(skald::tokens::surface::control_hi));
-        ImGui::PushStyleColor(ImGuiCol_Text, skald::tokens::to_vec4(skald::tokens::ink::primary));
+                              palette::to_vec4(palette::surface::control_hi));
+        ImGui::PushStyleColor(ImGuiCol_Text, palette::to_vec4(palette::ink::primary));
     }
     ImGui::PushID(label);
     const bool clicked = ImGui::Button(label, ImVec2(width, 0.0f));
@@ -5235,7 +5257,7 @@ bool playback_speed_button(const char* label, bool selected, float width) {
 }
 
 void draw_playback_speed_controls(AppState& state) {
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "speed");
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "speed");
     for (double preset : kPlaybackSpeedPresets) {
         ImGui::SameLine();
         char label[16] = {};
@@ -5382,9 +5404,9 @@ void draw_data_ticker(const AppState& state, ImDrawList* draw, std::size_t first
     }
 
     draw->AddRectFilled(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_bottom),
-                        skald::tokens::surface::panel_alt);
+                        palette::surface::panel_alt);
     draw->AddLine(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_top - 4.0f),
-                  skald::tokens::border::separator, 1.0f);
+                  palette::border::separator, 1.0f);
 
     const std::size_t stride = std::max<std::size_t>(
         1u, static_cast<std::size_t>(
@@ -5401,7 +5423,7 @@ void draw_data_ticker(const AppState& state, ImDrawList* draw, std::size_t first
         const std::string label = hex_sample_text(*byte, data_sample_bits(state));
         const float x = plot_left + static_cast<float>(i) * x_step;
         const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
-        draw->AddText(ImVec2(x - text_size.x * 0.5f, ticker_top), skald::tokens::ink::muted,
+        draw->AddText(ImVec2(x - text_size.x * 0.5f, ticker_top), palette::ink::muted,
                       label.c_str());
     }
 
@@ -5422,9 +5444,8 @@ void draw_data_ticker(const AppState& state, ImDrawList* draw, std::size_t first
     const ImVec2 text_pos(x - text_size.x * 0.5f, ticker_top);
     draw->AddRectFilled(ImVec2(text_pos.x - 6.0f, text_pos.y - 3.0f),
                         ImVec2(text_pos.x + text_size.x + 6.0f, text_pos.y + text_size.y + 3.0f),
-                        skald::tokens::surface::control_hi, skald::tokens::radii::ctrl);
-    draw->AddText(current_font, current_font_size, text_pos, skald::tokens::ink::primary,
-                  label.c_str());
+                        palette::surface::control_hi, palette::radii::ctrl);
+    draw->AddText(current_font, current_font_size, text_pos, palette::ink::primary, label.c_str());
 }
 
 void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t first, std::size_t last,
@@ -5447,8 +5468,8 @@ void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t firs
     }
 
     draw->AddRectFilled(ImVec2(clip_min.x, strip_top), ImVec2(clip_max.x, strip_bottom),
-                        skald::tokens::surface::panel_alt, skald::tokens::radii::ctrl);
-    draw->AddText(ImVec2(clip_min.x + 8.0f, strip_top + 8.0f), skald::tokens::ink::muted, "parity");
+                        palette::surface::panel_alt, palette::radii::ctrl);
+    draw->AddText(ImVec2(clip_min.x + 8.0f, strip_top + 8.0f), palette::ink::muted, "parity");
 
     const float graph_left = clip_min.x + 58.0f;
     const float graph_right = clip_max.x - 12.0f;
@@ -5460,8 +5481,8 @@ void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t firs
 
     for (std::size_t track = 0; track < track_span; ++track) {
         const float y = y_for_track(static_cast<double>(track));
-        draw->AddLine(ImVec2(graph_left, y), ImVec2(graph_right, y),
-                      skald::tokens::border::separator, 1.0f);
+        draw->AddLine(ImVec2(graph_left, y), ImVec2(graph_right, y), palette::border::separator,
+                      1.0f);
     }
 
     const std::size_t samples = std::min<std::size_t>(2048u, last - first + 1u);
@@ -5479,7 +5500,7 @@ void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t firs
         }
         const ImVec2 point(plot_left + static_cast<float>(index) * x_step, y_for_track(*parity));
         if (has_previous) {
-            draw->AddLine(previous, point, skald::tokens::accents::gold, 1.35f);
+            draw->AddLine(previous, point, palette::accents::gold, 1.35f);
         }
         previous = point;
         has_previous = true;
@@ -5517,15 +5538,15 @@ void draw_auto_fit_progress_overlay(ImDrawList* draw, const AutoFitProgressSnaps
                                                  static_cast<float>(progress.total_samples),
                                              0.0f, 1.0f);
         draw->AddRectFilled(ImVec2(bar_left, bar_top), ImVec2(bar_right, bar_bottom),
-                            skald::tokens::surface::control_hi, skald::tokens::radii::pill);
+                            palette::surface::control_hi, palette::radii::pill);
         draw->AddRectFilled(ImVec2(bar_left, bar_top),
                             ImVec2(bar_left + (bar_right - bar_left) * ratio, bar_bottom),
-                            skald::tokens::status::info, skald::tokens::radii::pill);
+                            palette::status::info, palette::radii::pill);
         const std::string label =
             (progress.progress_label.empty() ? std::string("auto-fit") : progress.progress_label) +
             "  " + format_count(progress.processed_samples) + "/" +
             format_count(progress.total_samples) + " samples";
-        draw->AddText(ImVec2(bar_left, bar_top - 17.0f), skald::tokens::ink::muted, label.c_str());
+        draw->AddText(ImVec2(bar_left, bar_top - 17.0f), palette::ink::muted, label.c_str());
     }
 
     if (progress.active_segment_length == 0u || last < first) {
@@ -5542,8 +5563,8 @@ void draw_auto_fit_progress_overlay(ImDrawList* draw, const AutoFitProgressSnaps
     const std::size_t visible_last = std::min(last, active_last);
     const float x0 = plot_left + static_cast<float>(visible_first) * x_step;
     const float x1 = plot_left + static_cast<float>(visible_last) * x_step;
-    const ImU32 fill = skald::tokens::with_alpha(skald::tokens::status::info, 42.0f / 255.0f);
-    const ImU32 edge = skald::tokens::with_alpha(skald::tokens::status::info, 0.92f);
+    const ImU32 fill = palette::with_alpha(palette::status::info, 42.0f / 255.0f);
+    const ImU32 edge = palette::with_alpha(palette::status::info, 0.92f);
     draw->AddRectFilled(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), fill);
     draw->AddRect(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), edge, 0.0f, 0, 1.8f);
 
@@ -5577,8 +5598,8 @@ void draw_fitted_sections(ImDrawList* draw, const AppState& state, std::size_t f
                 lane_top + static_cast<float>(data_track_order) * (lane_height + lane_gap);
             const float lane_y1 = lane_y0 + lane_height;
             const ImU32 base_color = kWaveColors[data_track_order % kWaveColors.size()];
-            const ImU32 fill = skald::tokens::with_alpha(base_color, 30.0f / 255.0f);
-            const ImU32 edge = skald::tokens::with_alpha(base_color, 0.86f);
+            const ImU32 fill = palette::with_alpha(base_color, 30.0f / 255.0f);
+            const ImU32 edge = palette::with_alpha(base_color, 0.86f);
             char label[24] = {};
             std::snprintf(label, sizeof(label), "track %u", static_cast<unsigned>(track.id));
             draw->AddText(ImVec2(plot_left + 8.0f, lane_y0 - 1.0f), edge, label);
@@ -5644,10 +5665,10 @@ void draw_fitted_sections(ImDrawList* draw, const AppState& state, std::size_t f
         const std::size_t visible_first = std::max(first, section_first);
         const std::size_t visible_last = std::min(last, section_last);
         const ImU32 base_color = kWaveColors[section_index % kWaveColors.size()];
-        const ImU32 fill = skald::tokens::with_alpha(base_color, 34.0f / 255.0f);
+        const ImU32 fill = palette::with_alpha(base_color, 34.0f / 255.0f);
         const ImU32 edge = section.max_residual > section.fit_tolerance
-                               ? skald::tokens::status::destructive
-                               : skald::tokens::with_alpha(base_color, 0.88f);
+                               ? palette::status::destructive
+                               : palette::with_alpha(base_color, 0.88f);
         const float x0 = plot_left + static_cast<float>(section_first) * x_step;
         const float x1 = plot_left + static_cast<float>(section_last) * x_step;
         draw->AddRectFilled(ImVec2(x0, plot_top), ImVec2(x1, plot_bottom), fill);
@@ -5705,9 +5726,9 @@ void draw_plot(AppState& state) {
         auto* draw = ImGui::GetWindowDrawList();
         const ImVec2 min = ImGui::GetItemRectMin();
         const ImVec2 max = ImGui::GetItemRectMax();
-        draw->AddRectFilled(min, max, skald::tokens::surface::window);
-        draw->AddRect(min, max, skald::tokens::border::separator);
-        draw->AddText(ImVec2(min.x + 24.0f, min.y + 24.0f), skald::tokens::ink::muted,
+        draw->AddRectFilled(min, max, palette::surface::window);
+        draw->AddRect(min, max, palette::border::separator);
+        draw->AddText(ImVec2(min.x + 24.0f, min.y + 24.0f), palette::ink::muted,
                       state.workspace_open ? "No source data" : "No workspace");
         ImGui::End();
         return;
@@ -5723,8 +5744,9 @@ void draw_plot(AppState& state) {
     const float y_zoom = std::max(0.01f, std::abs(state.zoom_y));
     const double period_nm = data_spatial_period_nm(state);
     ensure_lazy_blocks(state, state.playhead_index, state.playhead_index);
-    if (skald::IconButton(state.xline_playing ? skald::icons::kPause : skald::icons::kPlay,
-                          state.xline_playing ? "Pause x-line" : "Play x-line")) {
+    if (thrystr::gui::icon_button(state.xline_playing ? thrystr::gui::icons::kPause
+                                                      : thrystr::gui::icons::kPlay,
+                                  state.xline_playing ? "Pause x-line" : "Play x-line")) {
         toggle_xline_playback(state);
     }
     ImGui::SameLine();
@@ -5745,16 +5767,12 @@ void draw_plot(AppState& state) {
     const float readout_width = playback_readout_width(state);
     const float readout_x = ImGui::GetCursorPosX();
     ImGui::BeginGroup();
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "x %s",
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "x %s",
                        format_count(state.playhead_index).c_str());
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "hex %s",
-                       playhead_hex.c_str());
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "track %s",
-                       track_text.c_str());
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "data %s",
-                       data_scalar_text.c_str());
-    ImGui::TextColored(skald::tokens::to_vec4(skald::tokens::ink::muted), "func %s",
-                       wave_scalar_text.c_str());
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "hex %s", playhead_hex.c_str());
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "track %s", track_text.c_str());
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "data %s", data_scalar_text.c_str());
+    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "func %s", wave_scalar_text.c_str());
     ImGui::EndGroup();
     ImGui::SameLine(readout_x + readout_width);
     if (playback_speed_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
@@ -5927,7 +5945,7 @@ void draw_plot(AppState& state) {
 
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(clip_min, clip_max, true);
-    draw->AddRectFilled(item_min, item_max, skald::tokens::surface::window);
+    draw->AddRectFilled(item_min, item_max, palette::surface::window);
     const AutoFitProgressSnapshot fit_progress = auto_fit_progress_snapshot(state);
 
     const float label_x = child_pos.x + 8.0f;
@@ -5936,23 +5954,22 @@ void draw_plot(AppState& state) {
     for (float y_value : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
         const float y = y_for_value(y_value, plot_top, plot_bottom, y_zoom);
         draw->AddLine(ImVec2(grid_x0, y), ImVec2(grid_x1, y),
-                      y_value == 0.0f ? skald::tokens::border::strong
-                                      : skald::tokens::border::separator,
+                      y_value == 0.0f ? palette::border::strong : palette::border::separator,
                       y_value == 0.0f ? 1.4f : 1.0f);
         char label[24] = {};
         std::snprintf(label, sizeof(label), "%.1f", static_cast<double>(y_value));
-        draw->AddText(ImVec2(label_x, y - 7.0f), skald::tokens::ink::muted, label);
+        draw->AddText(ImVec2(label_x, y - 7.0f), palette::ink::muted, label);
     }
 
     const std::size_t tick = nice_tick(160.0 / std::max(0.1f, x_step));
     const std::size_t tick_start = first - (first % tick);
     for (std::size_t i = tick_start; i <= last && i < count; i += tick) {
         const float x = plot_left + static_cast<float>(i) * x_step;
-        draw->AddLine(ImVec2(x, plot_top), ImVec2(x, plot_bottom), skald::tokens::border::separator,
+        draw->AddLine(ImVec2(x, plot_top), ImVec2(x, plot_bottom), palette::border::separator,
                       1.0f);
         char label[32] = {};
         std::snprintf(label, sizeof(label), "%.0f nm", static_cast<double>(i) * period_nm);
-        draw->AddText(ImVec2(x + 4.0f, plot_bottom + 8.0f), skald::tokens::ink::muted, label);
+        draw->AddText(ImVec2(x + 4.0f, plot_bottom + 8.0f), palette::ink::muted, label);
     }
 
     const std::size_t delta_index = std::min(analysis.window.delta_index, count - 1);
@@ -5960,8 +5977,7 @@ void draw_plot(AppState& state) {
         const float x = plot_left + static_cast<float>(delta_index) * x_step;
         draw->AddRectFilled(ImVec2(x - 2.0f, plot_top),
                             ImVec2(x + std::max(2.0f, x_step + 2.0f), plot_bottom), kMaxDeltaFill);
-        draw->AddText(ImVec2(x + 6.0f, plot_top + 6.0f), skald::tokens::status::destructive,
-                      "max delta");
+        draw->AddText(ImVec2(x + 6.0f, plot_top + 6.0f), palette::status::destructive, "max delta");
     }
 
     if (state.segment.active) {
@@ -6078,21 +6094,20 @@ void draw_plot(AppState& state) {
                                      x_step, y_zoom);
 
     draw->AddRect(ImVec2(plot_left, plot_top), ImVec2(plot_right, plot_bottom),
-                  skald::tokens::border::default_, 0.0f, 0, 1.0f);
-    draw->AddText(ImVec2(child_pos.x + margin_left, child_pos.y + 8.0f),
-                  skald::tokens::ink::primary, "x-line section");
+                  palette::border::default_, 0.0f, 0, 1.0f);
+    draw->AddText(ImVec2(child_pos.x + margin_left, child_pos.y + 8.0f), palette::ink::primary,
+                  "x-line section");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 178.0f, child_pos.y + 8.0f), kDataLineColor,
                   "data");
     draw->AddText(ImVec2(child_pos.x + child_size.x - 128.0f, child_pos.y + 8.0f), kWaveColors[0],
                   "functions");
     if (state.show_reconstruction_only) {
-        draw->AddRectFilled(
-            ImVec2(child_pos.x + margin_left, child_pos.y + 28.0f),
-            ImVec2(child_pos.x + margin_left + 118.0f, child_pos.y + 52.0f),
-            skald::tokens::with_alpha(skald::tokens::status::warning, 48.0f / 255.0f),
-            skald::tokens::radii::pill);
+        draw->AddRectFilled(ImVec2(child_pos.x + margin_left, child_pos.y + 28.0f),
+                            ImVec2(child_pos.x + margin_left + 118.0f, child_pos.y + 52.0f),
+                            palette::with_alpha(palette::status::warning, 48.0f / 255.0f),
+                            palette::radii::pill);
         draw->AddText(ImVec2(child_pos.x + margin_left + 12.0f, child_pos.y + 33.0f),
-                      skald::tokens::status::warning, "reconstruction");
+                      palette::status::warning, "reconstruction");
     }
 
     if (state.playhead_index >= first && state.playhead_index <= last) {
@@ -6155,17 +6170,18 @@ const char* file_dialog_popup_label(DialogPurpose purpose) {
     return kFileDialogStableId;
 }
 
-skald::FileDialogResult begin_chromed_file_dialog(DialogPurpose purpose, skald::FileDialogMode mode,
-                                                  skald::FileDialogState& dialog,
-                                                  std::span<const skald::FileDialogEntry> entries) {
-    return skald::BeginFileDialog(file_dialog_popup_label(purpose), mode, dialog, entries);
+thrystr::gui::FileDialogResult
+begin_chromed_file_dialog(DialogPurpose purpose, thrystr::gui::FileDialogMode mode,
+                          thrystr::gui::FileDialogState& dialog,
+                          std::span<const thrystr::gui::FileDialogEntry> entries) {
+    return thrystr::gui::begin_file_dialog(file_dialog_popup_label(purpose), mode, dialog, entries);
 }
 
 void draw_file_dialog(AppState& state) {
     if (state.pending_dialog != DialogPurpose::None) {
         state.active_dialog = state.pending_dialog;
         state.pending_dialog = DialogPurpose::None;
-        skald::OpenFileDialog(file_dialog_popup_label(state.active_dialog));
+        thrystr::gui::open_file_dialog(file_dialog_popup_label(state.active_dialog));
     }
 
     if (state.active_dialog == DialogPurpose::None) {
@@ -6178,24 +6194,24 @@ void draw_file_dialog(AppState& state) {
     }
     const std::string cwd_before = state.file_dialog.cwd;
     const std::string filter_before = state.file_dialog.filter;
-    const skald::FileDialogMode mode = state.active_dialog == DialogPurpose::SaveWave
-                                           ? skald::FileDialogMode::Save
-                                           : skald::FileDialogMode::Open;
-    const skald::FileDialogResult result = begin_chromed_file_dialog(
+    const thrystr::gui::FileDialogMode mode = state.active_dialog == DialogPurpose::SaveWave
+                                                  ? thrystr::gui::FileDialogMode::Save
+                                                  : thrystr::gui::FileDialogMode::Open;
+    const thrystr::gui::FileDialogResult result = begin_chromed_file_dialog(
         state.active_dialog, mode, state.file_dialog,
-        std::span<const skald::FileDialogEntry>(state.file_dialog_entries.data(),
-                                                state.file_dialog_entries.size()));
+        std::span<const thrystr::gui::FileDialogEntry>(state.file_dialog_entries.data(),
+                                                       state.file_dialog_entries.size()));
 
     if (cwd_before != state.file_dialog.cwd || filter_before != state.file_dialog.filter) {
         state.file_dialog_dirty = true;
     }
     navigate_file_dialog_selection(state);
 
-    if (result == skald::FileDialogResult::Cancelled) {
+    if (result == thrystr::gui::FileDialogResult::Cancelled) {
         state.active_dialog = DialogPurpose::None;
         return;
     }
-    if (result != skald::FileDialogResult::Confirmed) {
+    if (result != thrystr::gui::FileDialogResult::Confirmed) {
         return;
     }
 
@@ -6309,7 +6325,7 @@ void draw_docs_panel(AppState& state) {
     const auto* pages = thrystr::docs::doc_pages();
     const std::size_t page_count = thrystr::docs::doc_page_count();
     if (page_count == 0u || pages == nullptr) {
-        skald::KvRowStatus("manual", "not generated", skald::BadgeTone::Warning);
+        thrystr::gui::status_row("manual", "not generated", thrystr::gui::StatusTone::Warning);
         ImGui::End();
         return;
     }
@@ -6335,7 +6351,7 @@ void draw_docs_panel(AppState& state) {
     draw_markdown_body(pages[static_cast<std::size_t>(state.docs_page)].markdown, state.fonts);
     ImGui::EndChild();
 #else
-    skald::KvRowStatus("manual", "not built", skald::BadgeTone::Warning);
+    thrystr::gui::status_row("manual", "not built", thrystr::gui::StatusTone::Warning);
 #endif
 
     ImGui::End();

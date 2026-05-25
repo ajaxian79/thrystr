@@ -132,6 +132,11 @@ if(THRYSTR_BUILD_APP)
 
     add_library(thrystr_gui STATIC
         src/gui/system/component.cpp
+        src/gui/system/control_buttons.cpp
+        src/gui/system/control_rows.cpp
+        src/gui/system/file_dialog_bridge.cpp
+        src/gui/system/file_dialog_state_bridge.cpp
+        src/gui/system/font_loader.cpp
         src/gui/system/image_pixels.cpp
         src/gui/system/image_png.cpp
         src/gui/system/image_texture.cpp
@@ -150,13 +155,15 @@ if(THRYSTR_BUILD_APP)
         src/gui/system/native_window_x11_resize.cpp
         src/gui/system/native_work_area.cpp
         src/gui/system/resize_cursor_set.cpp
+        src/gui/system/splash_bridge.cpp
+        src/gui/system/style_theme.cpp
         src/gui/system/texture_upload.cpp)
     target_include_directories(thrystr_gui PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
     target_link_libraries(thrystr_gui
-        PUBLIC thrystr::design_vendor
-        PRIVATE thrystr::image_vendor thrystr::glfw OpenGL::GL)
+        PUBLIC thrystr::interface_vendor
+        PRIVATE thrystr::design_vendor thrystr::image_vendor thrystr::glfw OpenGL::GL)
     target_compile_options(thrystr_gui PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>)
@@ -255,6 +262,11 @@ if(THRYSTR_BUILD_TESTS)
             tests/gui_window_tests.cpp)
         target_link_libraries(thrystr_gui_window_tests PRIVATE thrystr_gui)
         add_test(NAME thrystr_gui_window_tests COMMAND thrystr_gui_window_tests)
+
+        add_executable(thrystr_gui_style_tests
+            tests/gui_style_tests.cpp)
+        target_link_libraries(thrystr_gui_style_tests PRIVATE thrystr_gui)
+        add_test(NAME thrystr_gui_style_tests COMMAND thrystr_gui_style_tests)
     endif()
 endif()
 

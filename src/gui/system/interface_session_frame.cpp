@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <thrystr/gui/interface_session.hpp>
+#include <thrystr/gui/palette.hpp>
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
-#include <skald/skald.h>
 
 namespace thrystr::gui {
 namespace {
 
 void clear_background() {
-    constexpr unsigned int color = skald::tokens::surface::deep;
+    constexpr unsigned int color = palette::surface::deep;
     glClearColor(static_cast<float>((color >> IM_COL32_R_SHIFT) & 0xff) / 255.0f,
                  static_cast<float>((color >> IM_COL32_G_SHIFT) & 0xff) / 255.0f,
                  static_cast<float>((color >> IM_COL32_B_SHIFT) & 0xff) / 255.0f, 1.0f);
