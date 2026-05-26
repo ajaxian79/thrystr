@@ -139,6 +139,7 @@ if(THRYSTR_BUILD_APP)
         src/gui/system/native_window_x11_resize.cpp
         src/gui/system/native_work_area.cpp
         src/gui/system/resize_cursor_set.cpp
+        src/gui/system/runtime_config.cpp
         src/gui/system/splash_action_rows.cpp
         src/gui/system/splash_bridge.cpp
         src/gui/system/splash_hero.cpp
@@ -150,6 +151,8 @@ if(THRYSTR_BUILD_APP)
         src/gui/system/style_geometry.cpp
         src/gui/system/style_surfaces.cpp
         src/gui/system/style_theme.cpp
+        src/gui/system/timeline_draw.cpp
+        src/gui/system/timeline_range.cpp
         src/gui/system/texture_upload.cpp)
     target_include_directories(thrystr_gui PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -260,6 +263,11 @@ if(THRYSTR_BUILD_TESTS)
             tests/gui_style_tests.cpp)
         target_link_libraries(thrystr_gui_style_tests PRIVATE thrystr_gui)
         add_test(NAME thrystr_gui_style_tests COMMAND thrystr_gui_style_tests)
+
+        add_executable(thrystr_gui_timeline_tests
+            tests/gui_timeline_tests.cpp)
+        target_link_libraries(thrystr_gui_timeline_tests PRIVATE thrystr_gui)
+        add_test(NAME thrystr_gui_timeline_tests COMMAND thrystr_gui_timeline_tests)
     endif()
 endif()
 

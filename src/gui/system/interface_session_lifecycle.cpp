@@ -2,6 +2,7 @@
 #include <thrystr/gui/font_loader.hpp>
 #include <thrystr/gui/interface_session.hpp>
 #include <thrystr/gui/palette.hpp>
+#include <thrystr/gui/runtime_config.hpp>
 #include <thrystr/gui/style.hpp>
 
 #include <GLFW/glfw3.h>
@@ -20,6 +21,7 @@ void InterfaceSession::start(WindowHandle window, std::string_view font_director
     glfwSwapInterval(1);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    apply_runtime_config(ImGui::GetIO());
     apply_defaults(palette::accent::cyan);
     fonts = load_fonts(ImGui::GetIO(), font_directory.data());
     ImGui_ImplGlfw_InitForOpenGL(static_cast<GLFWwindow*>(window), true);

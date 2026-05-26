@@ -7,6 +7,7 @@
 #include <thrystr/gui/native_application.hpp>
 #include <thrystr/gui/native_window.hpp>
 #include <thrystr/gui/resize_cursor_set.hpp>
+#include <thrystr/gui/timeline_draw.hpp>
 #include <thrystr/scalar_analysis.hpp>
 
 #include <imgui.h>
@@ -471,6 +472,9 @@ struct AppState {
     thrystr::gui::FileDialogState file_dialog{};
     std::vector<FileBrowserEntry> file_dialog_rows;
     std::vector<thrystr::gui::FileDialogEntry> file_dialog_entries;
+    std::vector<float> plot_min_y;
+    std::vector<float> plot_max_y;
+    std::vector<ImVec2> plot_points;
     int file_dialog_last_row = -1;
     bool file_dialog_dirty = true;
     DialogPurpose pending_dialog = DialogPurpose::None;
@@ -5101,10 +5105,9 @@ float plot_x_step(const AppState& state) {
     return std::max(0.05f, point_spacing * slope_scale * zoom);
 }
 
-void draw_data_point_markers(ImDrawList* draw, const AppState& state, std::size_t first,
-                             std::size_t last, float plot_left, float plot_top, float plot_bottom,
-                             float x_step, float y_zoom, const ImVec2& clip_min,
-                             const ImVec2& clip_max) {
+void draw_data_point_markers(ImDrawList* draw, AppState& state, std::size_t first, std::size_t last,
+                             float plot_left, float plot_top, float plot_bottom, float x_step,
+                             float y_zoom, const ImVec2& clip_min, const ImVec2& clip_max) {
     const std::size_t count = source_sample_count(state);
     if (!draw || count == 0u || last < first) {
         return;
@@ -5126,8 +5129,8 @@ void draw_data_point_markers(ImDrawList* draw, const AppState& state, std::size_
 
     const int column_count =
         std::max(1, static_cast<int>(std::ceil(std::max(1.0f, clip_max.x - clip_min.x))));
-    std::vector<float> min_y(static_cast<std::size_t>(column_count), FLT_MAX);
-    std::vector<float> max_y(static_cast<std::size_t>(column_count), -FLT_MAX);
+    state.plot_min_y.assign(static_cast<std::size_t>(column_count), FLT_MAX);
+    state.plot_max_y.assign(static_cast<std::size_t>(column_count), -FLT_MAX);
 
     for (std::size_t i = first; i <= last && i < count; ++i) {
         const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, i);
@@ -5141,23 +5144,24 @@ void draw_data_point_markers(ImDrawList* draw, const AppState& state, std::size_
         const int column =
             std::clamp(static_cast<int>(std::floor(x - clip_min.x)), 0, column_count - 1);
         const float y = y_for_value(static_cast<float>(*scalar), plot_top, plot_bottom, y_zoom);
-        min_y[static_cast<std::size_t>(column)] =
-            std::min(min_y[static_cast<std::size_t>(column)], y);
-        max_y[static_cast<std::size_t>(column)] =
-            std::max(max_y[static_cast<std::size_t>(column)], y);
+        state.plot_min_y[static_cast<std::size_t>(column)] =
+            std::min(state.plot_min_y[static_cast<std::size_t>(column)], y);
+        state.plot_max_y[static_cast<std::size_t>(column)] =
+            std::max(state.plot_max_y[static_cast<std::size_t>(column)], y);
     }
 
     for (int column = 0; column < column_count; ++column) {
         const std::size_t index = static_cast<std::size_t>(column);
-        if (min_y[index] == FLT_MAX) {
+        if (state.plot_min_y[index] == FLT_MAX) {
             continue;
         }
         const float x = clip_min.x + static_cast<float>(column) + 0.5f;
-        if (std::abs(max_y[index] - min_y[index]) < 1.0f) {
-            draw->AddRectFilled(ImVec2(x - 0.5f, min_y[index] - 0.5f),
-                                ImVec2(x + 0.5f, min_y[index] + 0.5f), kDataPointMed);
+        if (std::abs(state.plot_max_y[index] - state.plot_min_y[index]) < 1.0f) {
+            draw->AddRectFilled(ImVec2(x - 0.5f, state.plot_min_y[index] - 0.5f),
+                                ImVec2(x + 0.5f, state.plot_min_y[index] + 0.5f), kDataPointMed);
         } else {
-            draw->AddLine(ImVec2(x, min_y[index]), ImVec2(x, max_y[index]), kDataPointLo, 1.0f);
+            draw->AddLine(ImVec2(x, state.plot_min_y[index]), ImVec2(x, state.plot_max_y[index]),
+                          kDataPointLo, 1.0f);
         }
     }
 }
@@ -5181,6 +5185,46 @@ void draw_selected_data_point_markers(ImDrawList* draw, const AppState& state, s
                                   palette::with_alpha(palette::accents::gold, 0.92f));
             draw->AddCircle(ImVec2(x, y), 7.0f, palette::ink::primary, 0, 1.4f);
         }
+    }
+}
+
+void flush_plot_points(ImDrawList* draw, std::vector<ImVec2>& points, ImU32 color,
+                       float thickness) {
+    thrystr::gui::stroke_polyline(draw, points, color, thickness);
+    points.clear();
+}
+
+void append_data_polyline(AppState& state, ImDrawList* draw, std::size_t first, std::size_t last,
+                          float plot_left, float plot_top, float plot_bottom, float x_step,
+                          float y_zoom) {
+    state.plot_points.clear();
+    state.plot_points.reserve(last >= first ? last - first + 1u : 0u);
+    for (std::size_t i = first; i <= last && i < source_sample_count(state); ++i) {
+        const std::optional<thrystr::app::Scalar> scalar = scalar_at(state, i);
+        if (!scalar) {
+            flush_plot_points(draw, state.plot_points, kDataLineColor, 1.2f);
+            continue;
+        }
+        state.plot_points.emplace_back(
+            plot_left + static_cast<float>(i) * x_step,
+            y_for_value(static_cast<float>(*scalar), plot_top, plot_bottom, y_zoom));
+    }
+    flush_plot_points(draw, state.plot_points, kDataLineColor, 1.2f);
+}
+
+void append_wave_polyline(AppState& state, const WaveEntity& wave, std::size_t first,
+                          std::size_t last, double period_nm, float plot_left, float plot_top,
+                          float plot_bottom, float x_step, float y_zoom) {
+    state.plot_points.clear();
+    const std::size_t samples = std::min<std::size_t>(4096, last - first + 1u);
+    state.plot_points.reserve(samples);
+    for (std::size_t sample = 0; sample < samples; ++sample) {
+        const double t = samples > 1u ? static_cast<double>(sample) / (samples - 1u) : 0.0;
+        const double index = static_cast<double>(first) + t * static_cast<double>(last - first);
+        const double value = wave_value_at_nm(wave, index * period_nm);
+        state.plot_points.emplace_back(
+            plot_left + static_cast<float>(index) * x_step,
+            y_for_value(static_cast<float>(value), plot_top, plot_bottom, y_zoom));
     }
 }
 
@@ -5408,9 +5452,7 @@ void draw_data_ticker(const AppState& state, ImDrawList* draw, std::size_t first
     draw->AddLine(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_top - 4.0f),
                   palette::border::separator, 1.0f);
 
-    const std::size_t stride = std::max<std::size_t>(
-        1u, static_cast<std::size_t>(
-                std::ceil(static_cast<double>(kTickerTargetLabelPixels) / std::max(1.0f, x_step))));
+    const std::size_t stride = thrystr::gui::pixel_stride(x_step, kTickerTargetLabelPixels);
     const std::size_t start = first - (first % stride);
     for (std::size_t i = start; i <= last && i < source_sample_count(state); i += stride) {
         if (i == state.playhead_index) {
@@ -5906,15 +5948,15 @@ void draw_plot(AppState& state) {
         }
     }
     ImGui::SetScrollX(state.timeline_scroll_x);
-    const float visible_left_local = state.timeline_scroll_x;
-    const float visible_width = child_width;
-    const float index_left = std::max(0.0f, (visible_left_local - margin_left) / x_step);
-    const float index_right = std::min(static_cast<float>(count - 1),
-                                       (visible_left_local + visible_width - margin_left) / x_step);
-    const std::size_t first =
-        std::min(count - 1, static_cast<std::size_t>(std::floor(std::max(0.0f, index_left))));
-    const std::size_t last = std::min(
-        count - 1, static_cast<std::size_t>(std::ceil(std::max(index_left, index_right))) + 2u);
+    const auto visible_range = thrystr::gui::visible_sample_range(
+        {count, state.timeline_scroll_x, child_width, margin_left, x_step});
+    if (!visible_range.valid) {
+        ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
+    const std::size_t first = visible_range.first;
+    const std::size_t last = visible_range.last;
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const auto index_from_x = [&](float x) {
         const double index = std::round((x - plot_left) / x_step);
@@ -5945,6 +5987,9 @@ void draw_plot(AppState& state) {
 
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(clip_min, clip_max, true);
+    thrystr::gui::reserve_timeline_geometry(
+        draw, visible_range.count() * (state.entities.size() + 2u),
+        visible_range.count() / thrystr::gui::pixel_stride(x_step, kTickerTargetLabelPixels) + 64u);
     draw->AddRectFilled(item_min, item_max, palette::surface::window);
     const AutoFitProgressSnapshot fit_progress = auto_fit_progress_snapshot(state);
 
@@ -6041,20 +6086,8 @@ void draw_plot(AppState& state) {
     const Entity* data = data_entity(state);
     const bool draw_data = data == nullptr || data->visible;
     if (draw_data && state.show_lines && !state.show_reconstruction_only) {
-        for (std::size_t i = first; i < last && i + 1 < count; ++i) {
-            const std::optional<thrystr::app::Scalar> scalar_a = scalar_at(state, i);
-            const std::optional<thrystr::app::Scalar> scalar_b = scalar_at(state, i + 1u);
-            if (!scalar_a || !scalar_b) {
-                continue;
-            }
-            const ImVec2 a(
-                plot_left + static_cast<float>(i) * x_step,
-                y_for_value(static_cast<float>(*scalar_a), plot_top, plot_bottom, y_zoom));
-            const ImVec2 b(
-                plot_left + static_cast<float>(i + 1) * x_step,
-                y_for_value(static_cast<float>(*scalar_b), plot_top, plot_bottom, y_zoom));
-            draw->AddLine(a, b, kDataLineColor, 1.2f);
-        }
+        append_data_polyline(state, draw, first, last, plot_left, plot_top, plot_bottom, x_step,
+                             y_zoom);
     }
     std::size_t wave_index = 0;
     for (const Entity& entity : state.entities) {
@@ -6063,24 +6096,9 @@ void draw_plot(AppState& state) {
         }
         const ImU32 color = kWaveColors[wave_index % kWaveColors.size()];
         ++wave_index;
-        const std::size_t samples = std::min<std::size_t>(4096, last - first + 1u);
-        ImVec2 previous{};
-        bool has_previous = false;
-        for (std::size_t sample = 0; sample < samples; ++sample) {
-            const double t =
-                samples > 1 ? static_cast<double>(sample) / static_cast<double>(samples - 1u) : 0.0;
-            const double index = static_cast<double>(first) + t * static_cast<double>(last - first);
-            const double x_nm = index * period_nm;
-            const double value = wave_value_at_nm(entity.wave, x_nm);
-            const ImVec2 point(
-                plot_left + static_cast<float>(index) * x_step,
-                y_for_value(static_cast<float>(value), plot_top, plot_bottom, y_zoom));
-            if (has_previous) {
-                draw->AddLine(previous, point, color, 1.5f);
-            }
-            previous = point;
-            has_previous = true;
-        }
+        append_wave_polyline(state, entity.wave, first, last, period_nm, plot_left, plot_top,
+                             plot_bottom, x_step, y_zoom);
+        thrystr::gui::stroke_polyline(draw, state.plot_points, color, 1.5f);
     }
 
     draw_fitted_sections(draw, state, first, last, plot_left, plot_top, plot_bottom, x_step,
