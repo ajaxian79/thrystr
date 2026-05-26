@@ -4,12 +4,31 @@
 #include <GLFW/glfw3.h>
 
 namespace thrystr::gui {
+namespace {
+
+int diagonal_down_cursor_shape() {
+#if defined(GLFW_RESIZE_NWSE_CURSOR)
+    return GLFW_RESIZE_NWSE_CURSOR;
+#else
+    return GLFW_ARROW_CURSOR;
+#endif
+}
+
+int diagonal_up_cursor_shape() {
+#if defined(GLFW_RESIZE_NESW_CURSOR)
+    return GLFW_RESIZE_NESW_CURSOR;
+#else
+    return GLFW_ARROW_CURSOR;
+#endif
+}
+
+} // namespace
 
 ResizeCursorSet::ResizeCursorSet() {
     horizontal_ = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
     vertical_ = glfwCreateStandardCursor(GLFW_VRESIZE_CURSOR);
-    diagonal_down_ = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
-    diagonal_up_ = glfwCreateStandardCursor(GLFW_RESIZE_NESW_CURSOR);
+    diagonal_down_ = glfwCreateStandardCursor(diagonal_down_cursor_shape());
+    diagonal_up_ = glfwCreateStandardCursor(diagonal_up_cursor_shape());
 }
 
 ResizeCursorSet::~ResizeCursorSet() {

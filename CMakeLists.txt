@@ -13,6 +13,16 @@ option(THRYSTR_BUILD_DOCS "Build the in-house documentation outputs" ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+include(CheckCXXSourceCompiles)
+
+set(CMAKE_REQUIRED_LIBRARIES quadmath)
+check_cxx_source_compiles("
+    #include <quadmath.h>
+    int main() {
+        __float128 value = strtoflt128(\"1.0\", nullptr);
+        return value > 0 ? 0 : 1;
+    }" THRYSTR_HAS_FLOAT128)
+unset(CMAKE_REQUIRED_LIBRARIES)
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
@@ -75,7 +85,8 @@ target_include_directories(thrystr_app PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(thrystr_app PUBLIC thrystr_core thrystr_model thrystr_ui)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if(THRYSTR_HAS_FLOAT128)
+    target_compile_definitions(thrystr_app PUBLIC THRYSTR_HAS_FLOAT128=1)
     target_link_libraries(thrystr_app PUBLIC quadmath)
 endif()
 target_compile_options(thrystr_app PRIVATE

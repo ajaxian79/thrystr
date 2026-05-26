@@ -19,7 +19,7 @@
 #if defined(THRYSTR_HAS_DOCS)
 #include "docs_resources.hpp"
 #endif
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
 #include <quadmath.h>
 #endif
 
@@ -887,7 +887,7 @@ std::size_t source_sample_count(const AppState& state) {
 }
 
 thrystr::app::Scalar scalar_ldexp(thrystr::app::Scalar value, int exponent) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return ldexpq(value, exponent);
 #else
     return std::ldexp(value, exponent);
@@ -895,7 +895,7 @@ thrystr::app::Scalar scalar_ldexp(thrystr::app::Scalar value, int exponent) {
 }
 
 bool scalar_isfinite(thrystr::app::Scalar value) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return finiteq(value) != 0;
 #else
     return std::isfinite(value);
@@ -903,7 +903,7 @@ bool scalar_isfinite(thrystr::app::Scalar value) {
 }
 
 thrystr::app::Scalar scalar_trunc(thrystr::app::Scalar value) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return truncq(value);
 #else
     return std::trunc(value);
@@ -911,7 +911,7 @@ thrystr::app::Scalar scalar_trunc(thrystr::app::Scalar value) {
 }
 
 thrystr::app::Scalar scalar_fmod(thrystr::app::Scalar value, thrystr::app::Scalar divisor) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return fmodq(value, divisor);
 #else
     return std::fmod(value, divisor);

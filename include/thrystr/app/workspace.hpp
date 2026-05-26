@@ -9,7 +9,7 @@
 
 namespace thrystr::app {
 
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
 using Scalar = __float128;
 #else
 using Scalar = long double;

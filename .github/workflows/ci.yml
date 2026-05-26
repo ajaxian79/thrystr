@@ -39,7 +39,12 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
       - name: Configure
         shell: bash
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: |
+          app_flag="-DTHRYSTR_BUILD_APP=ON"
+          if [[ "${{ runner.os }}" != "Linux" ]]; then
+            app_flag="-DTHRYSTR_BUILD_APP=OFF"
+          fi
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo "$app_flag"
         env:
           CXX: ${{ matrix.cxx }}
       - name: Build

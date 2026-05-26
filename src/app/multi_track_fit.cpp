@@ -7,7 +7,7 @@
 #include <limits>
 #include <numbers>
 #include <numeric>
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
 #include <quadmath.h>
 #endif
 
@@ -58,7 +58,7 @@ bool better_sparse_score(const SparseFitScore& candidate, const SparseFitScore& 
 }
 
 Scalar scalar_abs(Scalar value) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return fabsq(value);
 #else
     return std::abs(value);
@@ -66,7 +66,7 @@ Scalar scalar_abs(Scalar value) {
 }
 
 Scalar scalar_sin(Scalar value) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return sinq(value);
 #else
     return std::sin(value);
@@ -74,7 +74,7 @@ Scalar scalar_sin(Scalar value) {
 }
 
 Scalar scalar_fmod(Scalar value, Scalar divisor) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return fmodq(value, divisor);
 #else
     return std::fmod(value, divisor);
@@ -82,7 +82,7 @@ Scalar scalar_fmod(Scalar value, Scalar divisor) {
 }
 
 Scalar scalar_pi() {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     static const Scalar pi = strtoflt128("3.141592653589793238462643383279502884", nullptr);
     return pi;
 #else

@@ -5,7 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <numbers>
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
 #include <quadmath.h>
 #endif
 
@@ -13,7 +13,7 @@ namespace thrystr::app {
 namespace {
 
 Scalar scalar_sin(Scalar value) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return sinq(value);
 #else
     return std::sin(value);
@@ -21,7 +21,7 @@ Scalar scalar_sin(Scalar value) {
 }
 
 Scalar scalar_pi() {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     static const Scalar pi = strtoflt128("3.141592653589793238462643383279502884", nullptr);
     return pi;
 #else

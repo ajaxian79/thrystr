@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
 #include <quadmath.h>
 #endif
 
@@ -14,7 +14,7 @@ namespace {
 constexpr std::size_t kMaxValidationIssues = 256u;
 
 double scalar_abs_to_double(Scalar value) {
-#if defined(__SIZEOF_FLOAT128__) && !defined(_MSC_VER)
+#if defined(THRYSTR_HAS_FLOAT128)
     return static_cast<double>(fabsq(value));
 #else
     return static_cast<double>(std::abs(value));

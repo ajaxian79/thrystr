@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include "native_window_backend.hpp"
+#include "native_window_glfw_platform.hpp"
 
 #if defined(THRYSTR_HAS_X11) && defined(__linux__)
 #define GLFW_EXPOSE_NATIVE_X11
@@ -13,7 +14,7 @@ namespace thrystr::gui {
 
 bool move_resize_window_natively(GLFWwindow* window, WindowBounds bounds) noexcept {
 #if defined(THRYSTR_HAS_X11) && defined(__linux__)
-    if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
+    if (glfw_platform_is_x11()) {
         Display* display = glfwGetX11Display();
         const Window xwindow = glfwGetX11Window(window);
         if (display && xwindow != 0) {

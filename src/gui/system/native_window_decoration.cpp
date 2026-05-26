@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include "native_window_backend.hpp"
+#include "native_window_glfw_platform.hpp"
 
 #if defined(THRYSTR_HAS_X11) && defined(__linux__)
 #define GLFW_EXPOSE_NATIVE_X11
@@ -17,7 +18,7 @@ void hide_system_decoration(GLFWwindow* window) noexcept {
     }
     glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
 #if defined(THRYSTR_HAS_X11) && defined(__linux__)
-    if (glfwGetPlatform() != GLFW_PLATFORM_X11) {
+    if (!glfw_platform_is_x11()) {
         return;
     }
     Display* display = glfwGetX11Display();
