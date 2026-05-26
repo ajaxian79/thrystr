@@ -33,6 +33,24 @@ double approximate_riemann_zeta(double s) {
     return sum;
 }
 
+double bessel_j0(double value) {
+#if defined(__cpp_lib_math_special_functions)
+    return std::cyl_bessel_j(0.0, value);
+#else
+    const double x = std::abs(value);
+    if (x > 12.0) {
+        return std::sqrt(2.0 / (std::numbers::pi * x)) * std::cos(x - std::numbers::pi / 4.0);
+    }
+    double term = 1.0;
+    double sum = 1.0;
+    for (int k = 1; k <= 24; ++k) {
+        term *= -0.25 * x * x / static_cast<double>(k * k);
+        sum += term;
+    }
+    return sum;
+#endif
+}
+
 } // namespace
 
 StandardFunction normalize_standard_function(std::uint32_t raw) {
@@ -245,7 +263,7 @@ double standard_function_value(StandardFunction function, double unit_x) {
     case StandardFunction::RiemannZeta:
         return approximate_riemann_zeta(std::abs(unit_x) + 1.05);
     case StandardFunction::BesselJ0:
-        return std::cyl_bessel_j(0.0, theta);
+        return bessel_j0(theta);
     case StandardFunction::Count:
         break;
     }

@@ -80,6 +80,10 @@ void test_function_entity_plots_standard_math() {
                               static_cast<std::int64_t>(thrystr::model::StandardFunction::Cosine));
     assert(std::abs(function.plot(0.0).value() - 1.0) < 1.0e-9);
 
+    function.properties().set(
+        "function", static_cast<std::int64_t>(thrystr::model::StandardFunction::BesselJ0));
+    assert(std::isfinite(function.plot(1.0).value()));
+
     function.properties().set("rotation_degrees", 45.0);
     assert(function.plot(1.0).has_value());
 }
