@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-thrystr-dual
 #include <thrystr/gui/runtime_config.hpp>
 #include <thrystr/gui/timeline_draw.hpp>
+#include <thrystr/gui/timeline_playback.hpp>
 
 #include <imgui.h>
 
 #include <cassert>
+#include <cmath>
+#include <cstdio>
 
 namespace {
 
@@ -32,11 +35,45 @@ void test_runtime_config() {
     ImGui::DestroyContext();
 }
 
+void test_playback_navigation() {
+    thrystr::gui::TimelinePlayback playback;
+    thrystr::gui::set_playhead(playback, 100u, 10u);
+    assert(playback.index == 10u);
+    thrystr::gui::move_playhead(playback, 100u, -12);
+    assert(playback.index == 0u);
+    thrystr::gui::move_playhead(playback, 100u, 150);
+    assert(playback.index == 99u);
+}
+
+void test_playback_advance() {
+    thrystr::gui::TimelinePlayback playback;
+    playback.points_per_second = 60.0;
+    thrystr::gui::toggle_playback(playback, 8u);
+    thrystr::gui::advance_playback(playback, 8u, 0.05);
+    assert(playback.index == 3u);
+    thrystr::gui::advance_playback(playback, 8u, 1.0);
+    assert(playback.index == 7u);
+    assert(!playback.playing);
+}
+
+void test_custom_speed_parse() {
+    thrystr::gui::TimelinePlayback playback;
+    std::snprintf(playback.custom_speed_text.data(), playback.custom_speed_text.size(), "24.5");
+    thrystr::gui::apply_custom_speed(playback);
+    assert(std::abs(playback.points_per_second - 24.5) < 0.001);
+    std::snprintf(playback.custom_speed_text.data(), playback.custom_speed_text.size(), "bad");
+    thrystr::gui::apply_custom_speed(playback);
+    assert(std::abs(playback.points_per_second - 24.5) < 0.001);
+}
+
 } // namespace
 
 int main() {
     test_visible_range();
     test_stride();
     test_runtime_config();
+    test_playback_navigation();
+    test_playback_advance();
+    test_custom_speed_parse();
     return 0;
 }

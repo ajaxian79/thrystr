@@ -8,6 +8,7 @@
 #include <thrystr/gui/native_window.hpp>
 #include <thrystr/gui/resize_cursor_set.hpp>
 #include <thrystr/gui/timeline_draw.hpp>
+#include <thrystr/gui/timeline_playback.hpp>
 #include <thrystr/scalar_analysis.hpp>
 
 #include <imgui.h>
@@ -72,8 +73,6 @@ constexpr std::size_t kLazyBlockMinBytes = 1u * 1024u * 1024u;
 constexpr std::size_t kLazyBlockMaxBytes = 10u * 1024u * 1024u;
 constexpr std::size_t kLazyCacheMaxBlocks = 6u;
 constexpr int kDefaultLazyBlockMiB = 4;
-constexpr double kDefaultPlaybackPointsPerSecond = 60.0;
-constexpr std::array<double, 4> kPlaybackSpeedPresets = {12.0, 24.0, 30.0, 60.0};
 constexpr float kPlayheadScrubHitPixels = 18.0f;
 constexpr float kTickerCurrentScale = 1.5f;
 constexpr std::size_t kTickerTargetLabelPixels = 58u;
@@ -455,13 +454,7 @@ struct AppState {
     std::filesystem::path lazy_source_stream_path;
     std::uint64_t plot_frame = 0;
     std::uint64_t last_manual_scroll_frame = 0;
-    std::size_t playhead_index = 0;
-    double playhead_fraction = 0.0;
-    double playback_points_per_second = kDefaultPlaybackPointsPerSecond;
-    bool custom_playback_speed = false;
-    char custom_playback_speed_text[32] = "60";
-    bool xline_playing = false;
-    bool playhead_dragging = false;
+    thrystr::gui::TimelinePlayback playback{};
     std::vector<std::size_t> selected_data_points;
     int random_sample_count = kRandomSampleDefaultCount;
     std::uint64_t random_sample_seed = 0x544852595354ull;
@@ -475,6 +468,7 @@ struct AppState {
     std::vector<float> plot_min_y;
     std::vector<float> plot_max_y;
     std::vector<ImVec2> plot_points;
+    std::vector<thrystr::gui::TimelineTextLabel> ticker_labels;
     int file_dialog_last_row = -1;
     bool file_dialog_dirty = true;
     DialogPurpose pending_dialog = DialogPurpose::None;
@@ -486,8 +480,6 @@ struct AppState {
 
 const Entity* data_entity(const AppState& state);
 Entity* data_entity(AppState& state);
-bool playback_speed_button(const char* label, bool selected, float width = 42.0f);
-
 Args parse_args(int argc, char** argv) {
     Args args;
     for (int i = 1; i < argc; ++i) {
@@ -1869,10 +1861,7 @@ void open_empty_workspace(AppState& state) {
     state.point_selection_mode = false;
     state.property_tab = PropertyTab::Entities;
     state.timeline_scroll_x = 0.0f;
-    state.xline_playing = false;
-    state.playhead_dragging = false;
-    state.playhead_index = 0;
-    state.playhead_fraction = 0.0;
+    thrystr::gui::reset_playback(state.playback);
     state.pending_scroll_index.reset();
     state.selected_data_points.clear();
     state.status = "Empty workspace";
@@ -3825,12 +3814,11 @@ void load_path(AppState& state) {
             select_entity(state, data.id);
         }
         const std::size_t count = source_sample_count(state);
-        state.playhead_index = analysis.window.offset;
-        state.playhead_fraction = 0.0;
+        thrystr::gui::set_playhead(state.playback, count, analysis.window.offset);
+        state.playback.playing = false;
+        state.playback.dragging = false;
         state.timeline_scroll_x = 0.0f;
-        state.xline_playing = false;
-        state.playhead_dragging = false;
-        state.pending_scroll_index = state.playhead_index;
+        state.pending_scroll_index = state.playback.index;
         if (!state.segment.active && count > 0u) {
             state.segment.selection_start = analysis.window.offset;
             state.segment.selection_end =
@@ -4711,7 +4699,8 @@ void draw_property_tabs(AppState& state, const Entity* selected) {
         if (!enabled) {
             ImGui::BeginDisabled();
         }
-        if (playback_speed_button(property_tab_label(tab), state.property_tab == tab, 72.0f)) {
+        if (thrystr::gui::selected_button(property_tab_label(tab), state.property_tab == tab,
+                                          ImVec2(72.0f, 0.0f))) {
             state.property_tab = tab;
         }
         if (!enabled) {
@@ -4814,7 +4803,8 @@ void draw_entity_toolbox(AppState& state) {
                     ImGui::SameLine();
                 }
                 const std::string label = format_count(bits);
-                if (playback_speed_button(label.c_str(), data->data.sample_bits == bits, 42.0f)) {
+                if (thrystr::gui::selected_button(label, data->data.sample_bits == bits,
+                                                  ImVec2(42.0f, 0.0f))) {
                     data->data.sample_bits = bits;
                     sample_width_changed = true;
                 }
@@ -5247,136 +5237,27 @@ void append_wave_polyline(AppState& state, const WaveEntity& wave, std::size_t f
 }
 
 void set_playhead_index(AppState& state, std::size_t index, bool center_view) {
-    const std::size_t count = source_sample_count(state);
-    if (count == 0u) {
-        state.playhead_index = 0;
-        state.playhead_fraction = 0.0;
-        return;
-    }
-    state.playhead_index = std::min(index, count - 1u);
-    state.playhead_fraction = 0.0;
-    if (center_view) {
-        state.pending_scroll_index = state.playhead_index;
+    thrystr::gui::set_playhead(state.playback, source_sample_count(state), index);
+    if (center_view && source_sample_count(state) > 0u) {
+        state.pending_scroll_index = state.playback.index;
     }
 }
 
 void move_playhead_by(AppState& state, int delta) {
     const std::size_t count = source_sample_count(state);
-    if (count == 0u || delta == 0) {
-        return;
+    thrystr::gui::move_playhead(state.playback, count, delta);
+    if (count > 0u && delta != 0) {
+        state.pending_scroll_index = state.playback.index;
     }
-    if (delta < 0) {
-        const std::size_t amount = static_cast<std::size_t>(-delta);
-        set_playhead_index(
-            state, amount > state.playhead_index ? 0u : state.playhead_index - amount, true);
-        return;
-    }
-    const std::size_t amount = static_cast<std::size_t>(delta);
-    const std::size_t max_index = count - 1u;
-    const std::size_t clamped_playhead = std::min(state.playhead_index, max_index);
-    const std::size_t remaining = max_index - clamped_playhead;
-    set_playhead_index(state, amount >= remaining ? max_index : clamped_playhead + amount, true);
 }
 
 void toggle_xline_playback(AppState& state) {
-    if (source_sample_count(state) == 0u) {
-        return;
-    }
-    state.xline_playing = !state.xline_playing;
-    state.playhead_dragging = false;
-    state.playhead_fraction = 0.0;
-}
-
-void apply_custom_playback_speed(AppState& state) {
-    errno = 0;
-    char* end = nullptr;
-    const double value = std::strtod(state.custom_playback_speed_text, &end);
-    while (end && *end != '\0' && std::isspace(static_cast<unsigned char>(*end)) != 0) {
-        ++end;
-    }
-    if (end != state.custom_playback_speed_text && end != nullptr && *end == '\0' &&
-        errno != ERANGE && std::isfinite(value) && value > 0.0) {
-        state.playback_points_per_second = value;
-    }
-}
-
-bool playback_speed_button(const char* label, bool selected, float width) {
-    if (selected) {
-        ImGui::PushStyleColor(ImGuiCol_Button, palette::to_vec4(palette::status::info));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette::to_vec4(palette::status::info));
-        ImGui::PushStyleColor(ImGuiCol_Text, palette::to_vec4(palette::surface::window));
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, palette::to_vec4(palette::surface::control));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              palette::to_vec4(palette::surface::control_hi));
-        ImGui::PushStyleColor(ImGuiCol_Text, palette::to_vec4(palette::ink::primary));
-    }
-    ImGui::PushID(label);
-    const bool clicked = ImGui::Button(label, ImVec2(width, 0.0f));
-    ImGui::PopID();
-    ImGui::PopStyleColor(3);
-    return clicked;
-}
-
-void draw_playback_speed_controls(AppState& state) {
-    ImGui::TextColored(palette::to_vec4(palette::ink::muted), "speed");
-    for (double preset : kPlaybackSpeedPresets) {
-        ImGui::SameLine();
-        char label[16] = {};
-        std::snprintf(label, sizeof(label), "%.0f", preset);
-        const bool selected = !state.custom_playback_speed &&
-                              std::abs(state.playback_points_per_second - preset) < 0.001;
-        if (playback_speed_button(label, selected)) {
-            state.custom_playback_speed = false;
-            state.playback_points_per_second = preset;
-            state.playhead_fraction = 0.0;
-        }
-    }
-
-    ImGui::SameLine();
-    if (playback_speed_button("custom", state.custom_playback_speed, 74.0f)) {
-        if (!state.custom_playback_speed) {
-            std::snprintf(state.custom_playback_speed_text,
-                          sizeof(state.custom_playback_speed_text), "%.3g",
-                          state.playback_points_per_second);
-        }
-        state.custom_playback_speed = true;
-        apply_custom_playback_speed(state);
-        state.playhead_fraction = 0.0;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Use a typed playback rate");
-    }
-
-    if (state.custom_playback_speed) {
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(78.0f);
-        if (ImGui::InputText("##custom_playback_pps", state.custom_playback_speed_text,
-                             sizeof(state.custom_playback_speed_text))) {
-            apply_custom_playback_speed(state);
-            state.playhead_fraction = 0.0;
-        }
-    }
+    thrystr::gui::toggle_playback(state.playback, source_sample_count(state));
 }
 
 void update_xline_playback(AppState& state) {
-    const std::size_t count = source_sample_count(state);
-    const double points_per_second = std::max(0.0, state.playback_points_per_second);
-    if (!state.xline_playing || count == 0u || points_per_second <= 0.0) {
-        return;
-    }
-
-    state.playhead_fraction += ImGui::GetIO().DeltaTime * points_per_second;
-    const auto step_count = static_cast<std::size_t>(state.playhead_fraction);
-    if (step_count == 0u) {
-        return;
-    }
-    state.playhead_fraction -= static_cast<double>(step_count);
-    state.playhead_index = std::min(count - 1u, state.playhead_index + step_count);
-    if (state.playhead_index + 1u >= count) {
-        state.xline_playing = false;
-        state.playhead_fraction = 0.0;
-    }
+    thrystr::gui::advance_playback(state.playback, source_sample_count(state),
+                                   ImGui::GetIO().DeltaTime);
 }
 
 std::optional<std::uint64_t> ticker_sample_at(const AppState& state, std::size_t index) {
@@ -5452,60 +5333,38 @@ FitReadout fit_readout_at(const AppState& state, std::size_t index) {
     return readout;
 }
 
-void draw_data_ticker(const AppState& state, ImDrawList* draw, std::size_t first, std::size_t last,
+void draw_data_ticker(AppState& state, ImDrawList* draw, std::size_t first, std::size_t last,
                       float plot_left, float plot_bottom, float x_step, const ImVec2& clip_min,
                       const ImVec2& clip_max) {
     if (!draw || source_sample_count(state) == 0u || last < first) {
         return;
     }
 
-    const float ticker_top = plot_bottom + 58.0f;
-    const float ticker_bottom = clip_max.y - 8.0f;
-    if (ticker_bottom <= ticker_top) {
-        return;
-    }
-
-    draw->AddRectFilled(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_bottom),
-                        palette::surface::panel_alt);
-    draw->AddLine(ImVec2(clip_min.x, ticker_top - 4.0f), ImVec2(clip_max.x, ticker_top - 4.0f),
-                  palette::border::separator, 1.0f);
-
+    state.ticker_labels.clear();
     const std::size_t stride = thrystr::gui::pixel_stride(x_step, kTickerTargetLabelPixels);
+    state.ticker_labels.reserve((last - first) / stride + 2u);
     const std::size_t start = first - (first % stride);
     for (std::size_t i = start; i <= last && i < source_sample_count(state); i += stride) {
-        if (i == state.playhead_index) {
-            continue;
-        }
         const std::optional<std::uint64_t> byte = ticker_sample_at(state, i);
         if (!byte) {
             continue;
         }
-        const std::string label = hex_sample_text(*byte, data_sample_bits(state));
-        const float x = plot_left + static_cast<float>(i) * x_step;
-        const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
-        draw->AddText(ImVec2(x - text_size.x * 0.5f, ticker_top), palette::ink::muted,
-                      label.c_str());
+        state.ticker_labels.push_back({i, hex_sample_text(*byte, data_sample_bits(state))});
     }
 
-    if (state.playhead_index < first || state.playhead_index > last) {
-        return;
-    }
-    const std::optional<std::uint64_t> current_byte = ticker_sample_at(state, state.playhead_index);
-    if (!current_byte) {
-        return;
+    std::string current_label;
+    if (state.playback.index < first || state.playback.index > last) {
+        current_label.clear();
+    } else if (const std::optional<std::uint64_t> current_byte =
+                   ticker_sample_at(state, state.playback.index)) {
+        current_label = hex_sample_text(*current_byte, data_sample_bits(state));
     }
 
-    const std::string label = hex_sample_text(*current_byte, data_sample_bits(state));
-    const float x = plot_left + static_cast<float>(state.playhead_index) * x_step;
-    ImFont* current_font = state.fonts.mono ? state.fonts.mono : ImGui::GetFont();
-    const float current_font_size = ImGui::GetFontSize() * kTickerCurrentScale;
-    const ImVec2 text_size =
-        current_font->CalcTextSizeA(current_font_size, FLT_MAX, 0.0f, label.c_str());
-    const ImVec2 text_pos(x - text_size.x * 0.5f, ticker_top);
-    draw->AddRectFilled(ImVec2(text_pos.x - 6.0f, text_pos.y - 3.0f),
-                        ImVec2(text_pos.x + text_size.x + 6.0f, text_pos.y + text_size.y + 3.0f),
-                        palette::surface::control_hi, palette::radii::ctrl);
-    draw->AddText(current_font, current_font_size, text_pos, palette::ink::primary, label.c_str());
+    const std::span<const thrystr::gui::TimelineTextLabel> ticker_labels(
+        state.ticker_labels.data(), state.ticker_labels.size());
+    thrystr::gui::draw_timeline_ticker(draw, {plot_left, plot_bottom, x_step, clip_min, clip_max},
+                                       {state.playback.index, current_label, ticker_labels,
+                                        state.fonts.mono, kTickerCurrentScale});
 }
 
 void draw_parity_strip(ImDrawList* draw, const AppState& state, std::size_t first, std::size_t last,
@@ -5799,24 +5658,24 @@ void draw_plot(AppState& state) {
     const std::size_t count = source_sample_count(state);
     state.segment.selection_start = std::min(state.segment.selection_start, count - 1u);
     state.segment.selection_end = std::min(state.segment.selection_end, count - 1u);
-    state.playhead_index = std::min(state.playhead_index, count - 1u);
+    state.playback.index = std::min(state.playback.index, count - 1u);
     const float x_step = plot_x_step(state);
     const float y_zoom = std::max(0.01f, std::abs(state.zoom_y));
     const double period_nm = data_spatial_period_nm(state);
-    ensure_lazy_blocks(state, state.playhead_index, state.playhead_index);
-    if (thrystr::gui::icon_button(state.xline_playing ? thrystr::gui::icons::kPause
-                                                      : thrystr::gui::icons::kPlay,
-                                  state.xline_playing ? "Pause x-line" : "Play x-line")) {
+    ensure_lazy_blocks(state, state.playback.index, state.playback.index);
+    if (thrystr::gui::icon_button(state.playback.playing ? thrystr::gui::icons::kPause
+                                                         : thrystr::gui::icons::kPlay,
+                                  state.playback.playing ? "Pause x-line" : "Play x-line")) {
         toggle_xline_playback(state);
     }
     ImGui::SameLine();
     const std::optional<std::uint64_t> playhead_byte =
-        ticker_sample_at(state, state.playhead_index);
+        ticker_sample_at(state, state.playback.index);
     const std::string playhead_hex =
         playhead_byte ? hex_sample_text(*playhead_byte, data_sample_bits(state)) : "--";
     const std::optional<thrystr::app::Scalar> playhead_scalar =
-        scalar_at(state, state.playhead_index);
-    const FitReadout fit_readout = fit_readout_at(state, state.playhead_index);
+        scalar_at(state, state.playback.index);
+    const FitReadout fit_readout = fit_readout_at(state, state.playback.index);
     const std::string track_text = fit_readout.available
                                        ? std::to_string(static_cast<unsigned>(fit_readout.track_id))
                                        : std::string("--");
@@ -5828,15 +5687,15 @@ void draw_plot(AppState& state) {
     const float readout_x = ImGui::GetCursorPosX();
     ImGui::BeginGroup();
     ImGui::TextColored(palette::to_vec4(palette::ink::muted), "x %s",
-                       format_count(state.playhead_index).c_str());
+                       format_count(state.playback.index).c_str());
     ImGui::TextColored(palette::to_vec4(palette::ink::muted), "hex %s", playhead_hex.c_str());
     ImGui::TextColored(palette::to_vec4(palette::ink::muted), "track %s", track_text.c_str());
     ImGui::TextColored(palette::to_vec4(palette::ink::muted), "data %s", data_scalar_text.c_str());
     ImGui::TextColored(palette::to_vec4(palette::ink::muted), "func %s", wave_scalar_text.c_str());
     ImGui::EndGroup();
     ImGui::SameLine(readout_x + readout_width);
-    if (playback_speed_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
-                              state.wheel_scroll_mode, 102.0f)) {
+    if (thrystr::gui::selected_button(state.wheel_scroll_mode ? "wheel scroll" : "wheel scale",
+                                      state.wheel_scroll_mode, ImVec2(102.0f, 0.0f))) {
         state.wheel_scroll_mode = !state.wheel_scroll_mode;
     }
     if (ImGui::IsItemHovered()) {
@@ -5844,7 +5703,8 @@ void draw_plot(AppState& state) {
                                                   : "Mouse wheel scales the x timeline");
     }
     ImGui::SameLine();
-    if (playback_speed_button("segment", state.segment_selection_mode, 78.0f)) {
+    if (thrystr::gui::selected_button("segment", state.segment_selection_mode,
+                                      ImVec2(78.0f, 0.0f))) {
         state.segment_selection_mode = !state.segment_selection_mode;
         if (state.segment_selection_mode) {
             state.point_selection_mode = false;
@@ -5857,7 +5717,7 @@ void draw_plot(AppState& state) {
                               : "Timeline clicks move the playhead");
     }
     ImGui::SameLine();
-    if (playback_speed_button("points", state.point_selection_mode, 70.0f)) {
+    if (thrystr::gui::selected_button("points", state.point_selection_mode, ImVec2(70.0f, 0.0f))) {
         state.point_selection_mode = !state.point_selection_mode;
         if (state.point_selection_mode) {
             state.segment_selection_mode = false;
@@ -5873,7 +5733,7 @@ void draw_plot(AppState& state) {
     if (ImGui::GetContentRegionAvail().x > 330.0f) {
         ImGui::SameLine();
     }
-    draw_playback_speed_controls(state);
+    thrystr::gui::draw_playback_speed_controls(state.playback);
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const float plot_height = std::max(360.0f, available.y - 8.0f);
     const float margin_left = 58.0f;
@@ -5912,9 +5772,9 @@ void draw_plot(AppState& state) {
     const bool manual_scroll_recent =
         state.plot_frame >= state.last_manual_scroll_frame &&
         state.plot_frame - state.last_manual_scroll_frame <= kManualScrollAutoscrollInhibitFrames;
-    if (state.xline_playing && !manual_scroll_recent) {
+    if (state.playback.playing && !manual_scroll_recent) {
         const float playhead_local =
-            margin_left + static_cast<float>(state.playhead_index) * x_step;
+            margin_left + static_cast<float>(state.playback.index) * x_step;
         const float visible_midpoint = state.timeline_scroll_x + child_width * 0.5f;
         if (playhead_local >= visible_midpoint) {
             state.timeline_scroll_x =
@@ -5981,27 +5841,27 @@ void draw_plot(AppState& state) {
         return static_cast<std::size_t>(std::clamp(index, 0.0, static_cast<double>(count - 1u)));
     };
     const auto index_from_mouse = [&]() { return index_from_x(mouse.x); };
-    const float playhead_hit_x = plot_left + static_cast<float>(state.playhead_index) * x_step;
+    const float playhead_hit_x = plot_left + static_cast<float>(state.playback.index) * x_step;
     const bool playhead_hit = std::abs(mouse.x - playhead_hit_x) <= kPlayheadScrubHitPixels &&
                               mouse.y >= plot_top && mouse.y <= clip_max.y;
-    bool playhead_scrub_claimed = state.playhead_dragging;
+    bool playhead_scrub_claimed = state.playback.dragging;
     if (plot_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && playhead_hit) {
-        state.playhead_dragging = true;
-        state.xline_playing = false;
-        state.playhead_fraction = 0.0;
+        state.playback.dragging = true;
+        state.playback.playing = false;
+        state.playback.fraction = 0.0;
         state.selection_drag_handle = 0;
         playhead_scrub_claimed = true;
     }
-    if (state.playhead_dragging) {
+    if (state.playback.dragging) {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             set_playhead_index(state, index_from_mouse(), false);
             playhead_scrub_claimed = true;
         } else {
-            state.playhead_dragging = false;
+            state.playback.dragging = false;
         }
     }
-    ensure_lazy_blocks(state, std::min(first, state.playhead_index),
-                       std::max(last, state.playhead_index));
+    ensure_lazy_blocks(state, std::min(first, state.playback.index),
+                       std::max(last, state.playback.index));
 
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(clip_min, clip_max, true);
@@ -6146,12 +6006,12 @@ void draw_plot(AppState& state) {
                       palette::status::warning, "reconstruction");
     }
 
-    if (state.playhead_index >= first && state.playhead_index <= last) {
-        const float playhead_x = plot_left + static_cast<float>(state.playhead_index) * x_step;
+    if (state.playback.index >= first && state.playback.index <= last) {
+        const float playhead_x = plot_left + static_cast<float>(state.playback.index) * x_step;
         draw->AddLine(ImVec2(playhead_x, plot_top), ImVec2(playhead_x, clip_max.y - 8.0f),
                       kSelectionHandle, 2.0f);
         if (const std::optional<thrystr::app::Scalar> scalar =
-                scalar_at(state, state.playhead_index)) {
+                scalar_at(state, state.playback.index)) {
             draw->AddCircleFilled(ImVec2(playhead_x, y_for_value(static_cast<float>(*scalar),
                                                                  plot_top, plot_bottom, y_zoom)),
                                   4.0f, kSelectionHandle);

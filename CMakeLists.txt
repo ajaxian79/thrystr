@@ -163,7 +163,10 @@ if(THRYSTR_BUILD_APP)
         src/gui/system/style_surfaces.cpp
         src/gui/system/style_theme.cpp
         src/gui/system/timeline_draw.cpp
+        src/gui/system/timeline_playback.cpp
+        src/gui/system/timeline_playback_controls.cpp
         src/gui/system/timeline_range.cpp
+        src/gui/system/timeline_ticker.cpp
         src/gui/system/texture_upload.cpp)
     target_include_directories(thrystr_gui PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

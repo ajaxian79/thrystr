@@ -39,4 +39,20 @@ bool icon_button(std::string_view text, std::string_view tip, float size_px) {
     return clicked;
 }
 
+bool selected_button(std::string_view label, bool selected, ImVec2 size, std::string_view tip) {
+    const ImU32 button = selected ? palette::status::info : palette::surface::control;
+    const ImU32 hover = selected ? palette::status::info : palette::surface::control_hi;
+    const ImU32 text = selected ? palette::surface::window : palette::ink::primary;
+    ImGui::PushStyleColor(ImGuiCol_Button, control_color(button));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, control_color(hover));
+    ImGui::PushStyleColor(ImGuiCol_Text, control_color(text));
+    const auto id = control_id(label);
+    const bool clicked = ImGui::Button(id.c_str(), size);
+    ImGui::PopStyleColor(3);
+    if (!tip.empty() && ImGui::IsItemHovered()) {
+        tooltip(tip);
+    }
+    return clicked;
+}
+
 } // namespace thrystr::gui

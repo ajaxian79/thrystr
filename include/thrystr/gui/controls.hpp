@@ -22,6 +22,8 @@ void muted_separator(float top_pad = 4.0f, float bottom_pad = 4.0f);
 bool accent_button(std::string_view label, ImVec2 size = ImVec2(0.0f, 0.0f));
 bool ghost_button(std::string_view label, ImVec2 size = ImVec2(0.0f, 0.0f));
 bool icon_button(std::string_view text, std::string_view tooltip = {}, float size_px = 28.0f);
+bool selected_button(std::string_view label, bool selected, ImVec2 size = ImVec2(0.0f, 0.0f),
+                     std::string_view tooltip = {});
 
 void tooltip(std::string_view text);
 bool pill_toggle(std::string_view label, bool* value);
