@@ -1,21 +1,89 @@
-MIT License
-
+Thrystr Dual License
 Copyright (c) 2026 Ajaxian
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This software is provided under a dual-license model.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+──────────────────────────────────────────────────────────────────────
+1. NON-COMMERCIAL LICENSE  (the "Personal & Public License")
+──────────────────────────────────────────────────────────────────────
+
+You may use, copy, modify, merge, publish, distribute, and make publicly
+available the Software for any personal, educational, research, or other
+NON-COMMERCIAL purpose, including private personal use and publicly visible
+open-source work, provided that:
+
+(a) You do not sell, license, sublicense, host as a paid service, embed in a
+    paid product, or otherwise use the Software for commercial advantage.
+
+(b) You preserve this license notice and copyright notice in all copies or
+    substantial portions of the Software.
+
+(c) If you redistribute modified source code, your modifications must be
+    made available in source form under this same non-commercial license.
+
+(d) Patent license. To the extent the author owns or controls patents reading
+    on the Software, a non-exclusive, royalty-free, worldwide license to those
+    patents is granted to non-commercial users for the purposes contemplated by
+    this license. The Commercial License governs patent licensing for
+    commercial use.
+
+(e) Patent termination. If you initiate or participate in a patent claim
+    alleging that the Software, or any contribution thereto, infringes a
+    patent, the rights granted to you under this section terminate
+    immediately.
+
+(f) Termination. Any breach of the conditions in this section terminates the
+    rights granted to you automatically, without notice. To resume use, the
+    breach must be cured within 30 days, or a Commercial License obtained.
+
+──────────────────────────────────────────────────────────────────────
+2. COMMERCIAL LICENSE
+──────────────────────────────────────────────────────────────────────
+
+Commercial use is not permitted under Section 1.
+
+Commercial use includes, without limitation:
+
+- Selling or licensing the Software or a derivative work.
+- Embedding the Software in a paid product or service.
+- Providing the Software as part of hosted, consulting, or managed services.
+- Internal business use by a for-profit entity where the Software materially
+  supports commercial operations.
+
+Commercial use requires a separate written commercial license from the
+copyright holder. To request one, contact:
+
+    hello@blaketullysmith.com
+
+Commercial License agreements are governed by the laws of the State of
+[TBD by Blake]; any dispute is resolved exclusively in the courts located
+therein.
+
+──────────────────────────────────────────────────────────────────────
+3. WARRANTY DISCLAIMER
+──────────────────────────────────────────────────────────────────────
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+──────────────────────────────────────────────────────────────────────
+4. VENDORED THIRD-PARTY CODE
+──────────────────────────────────────────────────────────────────────
+
+Vendored third-party code remains under its original license terms. Those
+licenses are preserved with the vendored source and summarized in `NOTICE`.
+This license applies only to first-party thrystr code.
+
+──────────────────────────────────────────────────────────────────────
+5. CONTRIBUTIONS
+──────────────────────────────────────────────────────────────────────
+
+Contributions submitted via pull request, patch, or any other medium are
+accepted only under the terms in `CONTRIBUTING.md`, which grants the author
+the right to relicense the contribution under both the non-commercial and
+commercial terms above.

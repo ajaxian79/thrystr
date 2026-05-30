@@ -1,0 +1,17 @@
+thrystr assembled license expression:
+
+SPDX-License-Identifier: LicenseRef-thrystr-dual AND MIT AND Zlib AND libpng-2.0
+
+LicenseRef-thrystr-dual
+    First-party thrystr source code. See LICENSE.
+
+Dear ImGui - https://github.com/ocornut/imgui - MIT
+    Integrated at src/gui/interface. See LICENSE.txt and VERSION.
+    Pinned to v1.91.5-docking at 368123ab06b2b573d585e52f84cd782c5c006697.
+    imgui_demo.cpp is intentionally not integrated.
+
+GLFW - https://www.glfw.org/ - zlib/libpng license
+    Linked from the host system package via pkg-config.
+
+libpng - http://www.libpng.org/pub/png/libpng.html - libpng-2.0
+    Linked from the host system package.

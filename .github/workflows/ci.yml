@@ -1,0 +1,136 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    name: build-${{ matrix.os }}-${{ matrix.compiler }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+            cxx: g++
+            experimental: false
+          - os: ubuntu-latest
+            compiler: clang
+            cxx: clang++
+            experimental: false
+          - os: macos-latest
+            compiler: clang
+            cxx: clang++
+            experimental: true
+          - os: windows-latest
+            compiler: msvc
+            cxx: cl
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+      - name: Configure
+        shell: bash
+        run: |
+          app_flag="-DTHRYSTR_BUILD_APP=ON"
+          if [[ "${{ runner.os }}" != "Linux" ]]; then
+            app_flag="-DTHRYSTR_BUILD_APP=OFF"
+          fi
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo "$app_flag"
+        env:
+          CXX: ${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --build-config Debug
+
+  sanitizer:
+    name: sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+      - name: Configure ASan/UBSan
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build --output-on-failure
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+      - name: Check formatting
+        run: |
+          files=$(git ls-files 'include/**/*.hpp' 'src/**/*.cpp' 'src/**/*.hpp' 'tests/**/*.cpp' 'tools/**/*.cpp' 'tools/**/*.hpp' | grep -v '/gui/interface/' || true)
+          test -z "$files" || clang-format --dry-run --Werror $files
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang clang-tidy pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+      - name: Configure compile database
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_COMPILER=clang++
+      - name: Run clang-tidy on first-party files
+        run: |
+          gcc_include=$(gcc -print-file-name=include)
+          files=$(git ls-files 'src/**/*.cpp' 'tools/**/*.cpp' | grep -v '/gui/interface/' || true)
+          test -z "$files" || clang-tidy -p build --extra-arg=-I"$gcc_include" $files
+
+  fuzz:
+    name: fuzz-wave-settings
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang pkg-config libgl1-mesa-dev libglfw3-dev libpng-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+      - name: Build fuzz target
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=Debug
+          -DTHRYSTR_BUILD_FUZZ=ON
+          -DCMAKE_CXX_COMPILER=clang++
+      - name: Compile
+        run: cmake --build build --target thrystr_wave_settings_fuzz --parallel
+      - name: Run short fuzz pass
+        run: ./build/thrystr_wave_settings_fuzz -max_total_time=60
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

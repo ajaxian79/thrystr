@@ -1,0 +1,12 @@
+title = "thrystr gitleaks rules"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Local documentation paths and generated report references"
+paths = [
+  '''CODE_REVIEW\.md''',
+  '''docs/.*''',
+  '''src/gui/vendor/.*''',
+]
